@@ -1,89 +1,67 @@
-# 刀徒复刻 · 内部自用版
+# 短剧工作台 · 内部自用版
 
-按「先打通工作流」的目标，现在拆成两个服务，已经能端到端跑：
+剧本 → 资产 → 分镜 → 站位图 → 提示词 → 视频 → 成片，一条线跑通。功能对照刀徒 AI 的截图逐页补齐（见 `screens/` 截图册与 `刀徒AI-工作流与模型调用拆解.md`）。
 
 ```
-┌──────────────────────────┐        ┌──────────────────────────────┐
-│  workflow  :8011         │  HTTP  │  aggregator :8010            │
-│  剧本→分集→分镜→提示词    │ ─────► │  chat / image / video 统一接口 │
-│  →视频任务→回执           │        │  选路降级 + 预扣结算 + 毛利    │
-│  SQLite: 项目/镜头/任务   │        │  SQLite: 钱包/账本/任务        │
-└──────────────────────────┘        └──────────────────────────────┘
-                                                │
-                                    ┌───────────┴───────────┐
-                                    │ 20 家上游（DM/XC/SX/…）│
-                                    │ 无 key 时自动走 mock    │
-                                    └───────────────────────┘
+┌──────────────────────────────────┐  HTTP  ┌─────────────────────────────┐
+│ workflow  :8011  网页工作台 + API │ ─────► │ aggregator :8010            │
+│ 项目/剧本/场次/资产形态/分镜/站位  │        │ chat / image / video 统一接口 │
+│ 提示词@绑定/视频多版本/成片/对话   │        │ 选路降级 · 预扣结算 · 账本    │
+│ SQLite + 本地素材 media/          │        │ 真实渠道：DeepSeek/百炼/火山   │
+└──────────────────────────────────┘        │ 其余渠道无 key 自动走模拟      │
+                                             └─────────────────────────────┘
 ```
 
-## 快速开始
+## 启动
+
+Windows 双击 **`启动工作台.cmd`**（等同 `py -3.12 run.py`），浏览器会自动打开 http://127.0.0.1:8011/ 。
 
 ```bash
-# 1) 聚合层（先起，工作流依赖它）
-cd aggregator && python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
-
-# 2) 工作流
-cd workflow && python -m uvicorn wf.main:app --host 127.0.0.1 --port 8011
-
-# 3) 端到端演示（建项目 → 剧本 → 一键 → 轮询 → 报表）
-python workflow/examples/demo.py
+py -3.12 -m pip install -r aggregator/requirements.txt   # 第一次
+py -3.12 run.py            # 启动两个服务并打开浏览器
+py -3.12 run.py --mock     # 全部走模拟渠道（演示/培训，不花钱）
 ```
 
-Windows 也可以直接双击 `aggregator/start.cmd` 和 `workflow/start.cmd`。
+依赖：Python 3.11+、ffmpeg（合成成片、截音色、封面帧）。日志在 `data/logs/`，项目库在 `workflow/data/studio.db`，素材在 `media/`。
 
-## 实测（全 mock，零成本）
+## 页面
 
-```
-storyboard: [{"episode":1,"shots":4,"source":"mock"},{"episode":2,"shots":3,"source":"mock"}]
-prompts: 7
-videos submitted: 7
+| 页面 | 能做什么 |
+|---|---|
+| 首页 | 新建/上传(导入)/下载(导出)/置顶/封面/删除项目；一键成片、一键剧本入口 |
+| 剧本 | 粘贴或上传 TXT/DOCX/PDF；全剧解析（分集+场次）；AI 智能解析 / 本地抽取资产；剧本检查提示 |
+| 资产 | 角色/场景/道具/生物/音频；每个资产多个**形态**，每个形态多个**版本**；生成、改图、AI 润色、上传、批量生图/上传/下载；适用集数与引用次数 |
+| 分镜 | 按集生成视频卡（时长受视频模型约束，卡内按【0-3秒】时间段写画面），表演/台词/音效/站位；新增、插入、删除卡片 |
+| 站位图 | 每个场次一张，人物到场后的位置关系；自动绑定场景与角色参考图；出片时作为参考 |
+| 提示词 | 刀徒格式：参考资产前缀 + 【镜头】时间轴 + 音效约束；`@名字`/`@名字（形态）` 自动绑定到资产版本；声线参考；剧本直转提示词；JSON 格式可选 |
+| 视频 | 单镜参数（参考模式/模型/分辨率/比例/时长）、勾选参考素材、上传本地素材、报价、生成；历史版本选用；截音色；批量生成/下载；播放全部 |
+| 成片 | 按集拼接选用版本，自动字幕（可烧录），下载 mp4 + srt |
+| 对话 | AI 助手 / 剧本助手（读项目剧本）/ 视频提示词智能体（读资产表），保留记录 |
+| 教程 | 全流程说明 |
 
-项目状态：videos_done  镜头 7 个
-  E1-1 远景/平视 6.0s [video_done] https://mock.local/…  ¥4.0
-  E1-2 全景/俯拍 4.0s [video_done] https://mock.local/…  ¥4.0
-  …
-  E2-2 全景/俯拍 4.0s [video_done] https://mock.local/…  ¥4.0
+右上角：项目花费与预算、通知中心、生成设置、一键成片（后台任务，进度实时显示）。
 
-聚合层报表: 收入 28.0  成本 23.52  毛利 16.0%
-钱包: 余额 72.0  累计消费 28.0
-```
+## 花钱的规矩
 
-## 环境变量
-
-| 变量 | 服务 | 默认 | 说明 |
-|---|---|---|---|
-| `AGG_BASE` | workflow | `http://127.0.0.1:8010` | 聚合层地址 |
-| `WORKFLOW_LLM` | workflow | `auto` | `auto`/`real`/`mock`；mock 用本地规则，零成本 |
-| `WORKFLOW_AUTO_TOPUP` | workflow | `100` | 遇到 402 自动充值额度（内部自用） |
-| `WORKFLOW_TEXT_MODEL` | workflow | `gpt-6.1-sol` | 分镜/提示词用的文本模型 |
-| `WORKFLOW_VIDEO_MODEL` | workflow | `seedance-2.5` | 视频模型 |
-| `WORKFLOW_POLL_INTERVAL_S` | workflow | `15` | 自动轮询回执间隔（0 关闭） |
-| `WORKFLOW_DB` / `AGG_DB` | 两者 | `data/*.db` | SQLite 路径 |
-| `*_API_KEY` | aggregator | — | 渠道 key，见 `aggregator/providers.yaml` |
-| `AGG_PROXY` | aggregator | — | 显式代理（默认不信环境变量） |
+- 模型分“真实 / 模拟”：有 key 的渠道真实调用并扣费（DeepSeek、阿里百炼、火山方舟）；其余走模拟，零成本。
+- 每个项目有**预算**（默认 ¥50），超出预算的视频批次不会提交；界面上真实模型操作前都会二次确认。
+- `AGG_FORCE_MOCK=1`（或 `run.py --mock`）全部强制模拟；测试脚本一律强制模拟。
+- 并发与冲突：编辑按“对象 + 字段”判冲突，后台回执写回不会挡住你的编辑（刀徒 325 次冲突的根因在这里修掉了）。
 
 ## 测试
 
 ```bash
-python aggregator/tests/run_tests.py   # 53 条：定价/预扣/幂等/降级/流式/对账/报表
-python workflow/tests/run_tests.py     # 31 条：剧本→分镜→提示词→视频→回执 全链路
+py -3.12 aggregator/tests/run_tests.py   # 聚合层：定价/预扣/幂等/降级/流式/对账
+py -3.12 workflow/tests/run_tests.py     # 工作流：129 条，覆盖上面所有页面的接口
+py -3.12 tools/smoke.py                  # 部署冒烟：真实启动器 + 一键成片（模拟渠道、临时库）
+py -3.12 tools/probe_models.py           # 核对真实渠道 key 与模型名（只读）；加 --chat 发一句话（几厘钱）
 ```
-
-两套测试都不联网、不花钱；工作流测试把聚合层以 ASGI 方式挂进同进程。
 
 ## 目录
 
 | 目录 | 内容 |
 |---|---|
-| `aggregator/` | 模型聚合层（20 渠道、计费、报表、对账） |
-| `workflow/` | 短剧流水线（项目/剧集/分镜/提示词/视频任务） |
-| `screens/` | 刀徒 AI 工作流截图册（学习用） |
-| `browser/`、`probe_api/` | 逆向出的接口/模型目录/登录态 |
-| `tools/` | 一次性脚本 |
-
-## 下一步（按优先级）
-
-1. 资产库：角色/场景跨镜头一致性（现在每个镜头独立提示词）
-2. 分镜图 / 站位图：聚合层 image 接口已就绪，未接
-3. 真实渠道联调：填 key，把 `WORKFLOW_LLM=auto`，跑同一套测试
-4. 简单前端或 CLI：直接读 `/projects/{id}` 的 JSON 渲染
+| `aggregator/` | 模型聚合层（渠道、目录、计费、报表、对账） |
+| `workflow/wf/` | 工作流：`pipeline.py` 核心，`assets_ops.py` 资产与出图，`video_ops.py` 视频与成片，`extras.py` 对话/通知/导入导出，`static/` 网页 |
+| `tools/` | 部署冒烟、渠道核对、逆向时的一次性脚本 |
+| `screens/`、`probe_api/`、`browser/` | 刀徒截图册与抓包（原始抓包、登录态不进仓库） |
