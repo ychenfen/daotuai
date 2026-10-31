@@ -24,6 +24,13 @@ providers:
     api_key_env: DASHSCOPE_API_KEY
     concurrency: 4
     timeout_s: 180
+  - id: dashscope_tts
+    label: 阿里百炼 · 千问语音合成
+    kind: dashscope_tts
+    base_url: https://dashscope.aliyuncs.com/api/v1
+    api_key_env: DASHSCOPE_API_KEY
+    concurrency: 6
+    timeout_s: 120
   - id: libtv
     label: LibTV（官方远程 MCP，OAuth 登录，扣 LibTV 账户积分）
     kind: libtv

@@ -9,12 +9,14 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import shutil
 import struct
 import subprocess
 import tempfile
+import wave
 import zlib
 
 from . import db
@@ -142,14 +144,112 @@ def probe(path: str) -> dict:
     fp = ffprobe_bin()
     if not fp:
         return {}
-    p = _run([fp, "-v", "error", "-show_entries", "format=duration:stream=codec_type",
+    p = _run([fp, "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height",
               "-of", "json", path], timeout=60)
     data = json.loads(p.stdout.decode("utf-8", "ignore") or "{}")
+    streams = data.get("streams") or []
+    v = next((s for s in streams if s.get("codec_type") == "video"), {})
     return {"duration": float((data.get("format") or {}).get("duration") or 0),
-            "has_audio": any(s.get("codec_type") == "audio" for s in data.get("streams") or [])}
+            "has_audio": any(s.get("codec_type") == "audio" for s in streams),
+            "width": int(v.get("width") or 0), "height": int(v.get("height") or 0)}
+
+
+def wav_seconds(path: str) -> float:
+    """wav 时长（不依赖 ffprobe）；不是 wav 时退回 ffprobe。"""
+    try:
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 1)
+    except (wave.Error, EOFError, OSError):
+        return float(probe(path).get("duration") or 0)
+
+
+def tone_wav(path: str, seconds: float, seed: str = "") -> str:
+    """模拟配音：一段很轻的提示音（按字数估时长），零成本、不依赖 ffmpeg。"""
+    rate = 24000
+    n = int(max(0.3, seconds) * rate)
+    freq = 180 + sum(seed.encode("utf-8")) % 200
+    frames = bytearray()
+    for i in range(n):
+        env = min(1.0, i / 1200, (n - i) / 1200)
+        frames += struct.pack("<h", int(2400 * env * math.sin(2 * math.pi * freq * i / rate)))
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+    return path
 
 
 # ---------------- 截取 ----------------
+
+async def sample_frames(src: str, out_dir: str, n: int = 4, width: int = 448, prefix: str = "f") -> list[str]:
+    """均匀抽 n 帧（避开首尾 5%），缩到 width 宽的 jpg，给质检看。"""
+    ff = ffmpeg_bin()
+    if not ff:
+        raise MediaError("没有 ffmpeg，抽不了帧")
+    dur = float(probe(src).get("duration") or 0) or 1.0
+    os.makedirs(out_dir, exist_ok=True)
+    out = []
+    for i in range(n):
+        at = dur * (0.05 + 0.9 * (i + 0.5) / n)
+        dst = os.path.join(out_dir, f"{prefix}{i + 1}.jpg")
+        await asyncio.to_thread(_run, [ff, "-y", "-loglevel", "error", "-ss", f"{at:.2f}", "-i", src,
+                                       "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "5", dst], None, 60)
+        if os.path.exists(dst):
+            out.append(dst)
+    return out
+
+
+async def thumb(src: str, dst: str, width: int = 448) -> str:
+    """参考图缩小成 jpg（发给视觉模型时不传 2K 原图）。"""
+    ff = ffmpeg_bin()
+    if not ff:
+        return src
+    await asyncio.to_thread(_run, [ff, "-y", "-loglevel", "error", "-i", src, "-vf", f"scale={width}:-2",
+                                   "-q:v", "5", dst], None, 60)
+    return dst if os.path.exists(dst) else src
+
+
+def _dub_track_sync(lines: list[dict], out_path: str, duration: float, gap: float = 0.25) -> dict:
+    """把一句句配音按顺序排进镜头时长里：放不下就加速（最多 1.35 倍），仍放不下就截断并标记 overflow。
+    lines: [{path, speaker, text}]；返回每句在镜头内的起止时间（字幕用）。"""
+    ff = ffmpeg_bin()
+    if not ff:
+        raise MediaError("没有 ffmpeg，合不了配音轨")
+    lines = [dict(x) for x in lines if x.get("path") and os.path.exists(x["path"])]
+    if not lines:
+        raise MediaError("没有可用的配音片段")
+    for x in lines:
+        x["raw_seconds"] = round(wav_seconds(x["path"]), 3)
+    lead = 0.3
+    avail = max(0.5, duration - lead - 0.2)
+    total = sum(x["raw_seconds"] for x in lines) + gap * (len(lines) - 1)
+    tempo = min(1.35, max(1.0, total / avail))
+    t = lead if total / tempo <= avail else 0.1
+    args = [ff, "-y", "-loglevel", "error"]
+    parts = []
+    for i, x in enumerate(lines):
+        args += ["-i", x["path"]]
+        d = x["raw_seconds"] / tempo
+        x["start"], x["end"] = round(t, 3), round(min(duration, t + d), 3)
+        ms = int(t * 1000)
+        chain = f"[{i}:a]aresample=44100,aformat=channel_layouts=stereo"
+        if tempo > 1.001:
+            chain += f",atempo={tempo:.3f}"
+        parts.append(f"{chain},adelay={ms}|{ms}[d{i}]")
+        t += d + gap
+    mix = "".join(f"[d{i}]" for i in range(len(lines)))
+    parts.append(f"{mix}amix=inputs={len(lines)}:duration=longest:dropout_transition=0:normalize=0,"
+                 f"apad,atrim=0:{duration:.3f}[out]")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    _run(args + ["-filter_complex", ";".join(parts), "-map", "[out]", "-c:a", "pcm_s16le", out_path])
+    return {"path": out_path, "tempo": round(tempo, 3), "overflow": t - gap > duration + 0.05,
+            "lines": [{k: x[k] for k in ("speaker", "voice", "text", "start", "end") if k in x} for x in lines]}
+
+
+async def dub_track(lines: list[dict], out_path: str, duration: float) -> dict:
+    return await asyncio.to_thread(_dub_track_sync, lines, out_path, duration)
 
 async def poster(src: str, dst: str, at: float = 0.5) -> str:
     """抽一帧做封面。"""
@@ -271,7 +371,7 @@ def _mix_bgm(ff: str, video: str, bgm: str, volume: float, out: str) -> None:
 
 
 def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str, burn: bool,
-                   bgm: str = "", bgm_volume: float = 0.25) -> dict:
+                   bgm: str = "", bgm_volume: float = 0.25, dub_mode: str = "off", orig_volume: float = 0.35) -> dict:
     ff = ffmpeg_bin()
     if not ff:
         raise MediaError("没有找到 ffmpeg：请安装 ffmpeg 或设置环境变量 FFMPEG")
@@ -288,7 +388,23 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
             vf = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
                   f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p")
             args = [ff, "-y", "-loglevel", "error", "-i", c["path"]]
-            if not info.get("has_audio", False):
+            dub = c.get("dub") if dub_mode in ("mix", "replace") else ""
+            if dub and os.path.exists(dub):
+                orig = "0:a"
+                if not info.get("has_audio", False):
+                    args += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+                    orig, di = "1:a", 2
+                else:
+                    di = 1
+                args += ["-i", dub]
+                fmt = "aresample=44100,aformat=channel_layouts=stereo"
+                if dub_mode == "replace":
+                    fc = f"[{di}:a]{fmt},apad[a]"
+                else:   # 配音为主，原声（音效/环境）压低垫底
+                    fc = (f"[{orig}]{fmt},volume={orig_volume:.2f}[o];[{di}:a]{fmt},apad[d];"
+                          f"[o][d]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]")
+                args += ["-filter_complex", fc, "-map", "0:v:0", "-map", "[a]"]
+            elif not info.get("has_audio", False):
                 args += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-map", "0:v:0", "-map", "1:a:0"]
             else:
                 args += ["-map", "0:v:0", "-map", "0:a:0"]
@@ -296,7 +412,11 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
                      "-c:a", "aac", "-ar", "44100", "-ac", "2", norm]
             _run(args)
             normed.append(norm)
-            if c.get("dialogue"):
+            if c.get("subs"):        # 有配音：字幕按每句配音的真实起止时间
+                for s0, s1, txt in c["subs"]:
+                    if s0 < dur and txt:
+                        subs.append((t + s0, t + min(s1, dur - 0.05), txt))
+            elif c.get("dialogue"):
                 subs.append((t + 0.1, t + dur - 0.1, c["dialogue"]))
             t += dur
         listing = os.path.join(work, "list.txt")
@@ -329,11 +449,14 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
             _mix_bgm(ff, out_path, bgm, bgm_volume, mixed)
             shutil.move(mixed, out_path)
         return {"path": out_path, "srt_path": srt_path, "seconds": round(t, 3), "clips": len(clips),
-                "subtitles": len(subs), "burned": bool(srt and burn), "bgm": bool(bgm)}
+                "subtitles": len(subs), "burned": bool(srt and burn), "bgm": bool(bgm),
+                "dubbed": sum(1 for c in clips if c.get("dub")) if dub_mode in ("mix", "replace") else 0}
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 async def assemble(clips: list[dict], out_path: str, srt_path: str, aspect: str = "9:16",
-                   burn: bool = False, bgm: str = "", bgm_volume: float = 0.25) -> dict:
-    return await asyncio.to_thread(_assemble_sync, clips, out_path, srt_path, aspect, burn, bgm, bgm_volume)
+                   burn: bool = False, bgm: str = "", bgm_volume: float = 0.25,
+                   dub_mode: str = "off", orig_volume: float = 0.35) -> dict:
+    return await asyncio.to_thread(_assemble_sync, clips, out_path, srt_path, aspect, burn, bgm, bgm_volume,
+                                   dub_mode, orig_volume)

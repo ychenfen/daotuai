@@ -611,6 +611,114 @@ async def main() -> int:
         bk = wfdb2.backup()
         check("数据库在线备份", bk and os.path.exists(bk) and os.path.getsize(bk) > 0, bk)
 
+        print("\n[Y] 自动质检 / 配音")
+        from wf.qc_dub import QcDubMixin  # noqa: E402
+        lines = QcDubMixin._dub_lines("孔宣（冷笑）：你也配？\n旁白：三百年后。\n{猪婆龙：那里！}\n（沉默）\n一句没有说话人的话")
+        check("台词拆句：角色/旁白/去表演括号/无前缀算旁白",
+              lines == [("孔宣", "你也配？"), ("旁白", "三百年后。"), ("猪婆龙", "那里！"), ("旁白", "一句没有说话人的话")],
+              str(lines))
+        await wf_main.wf().drain_background()
+        st = await j(await c.get(f"/projects/{pid}"))
+        done = [s for s in st["shots"] if s["job"] and s["job"]["status"] == "succeeded"]
+        auto = [s for s in done if s["job"].get("qc")]
+        check("出片后自动质检（后台）", len(auto) >= 1, f"{len(auto)}/{len(done)}")
+        if HAS_FFMPEG and done:
+            q = await j(await c.post(f"/projects/{pid}/qc", json={"episode_no": 1, "force": True}))
+            check("本集质检：每镜有分数和结论", q["checked"] >= 1 and all(0 <= x["score"] <= 100 and x["verdict"] in
+                  ("pass", "warn", "fail") for x in q["items"]), json.dumps(q, ensure_ascii=False)[:300])
+            st = await j(await c.get(f"/projects/{pid}"))
+            qq = next(s for s in st["shots"] if s["job"] and s["job"].get("qc"))["job"]["qc"]
+            check("质检含技术检查与抽帧（模拟模式不调视觉模型）", any(x["name"] == "画幅" for x in qq["checks"])
+                  and len(qq["frame_urls"]) == 4 and not qq["vision"],
+                  json.dumps(qq, ensure_ascii=False)[:300])
+            check("抽帧可访问", (await c.get(qq["frame_urls"][0])).status_code == 200, "")
+            # 画幅不对 → error 级 → 不合格
+            from wf import db as wfdb3  # noqa: E402
+            bj = next(s for s in st["shots"] if s["job"] and s["job"].get("qc"))["job"]
+            with wfdb3.tx() as cc:
+                cc.execute("UPDATE jobs SET aspect_ratio='1:1' WHERE id=?", (bj["id"],))
+            r = await j(await c.post(f"/jobs/{bj['id']}/qc"))
+            check("画幅不符判不合格", r["verdict"] == "fail" and any(i["type"] == "画幅" for i in r["issues"]),
+                  json.dumps(r, ensure_ascii=False)[:200])
+            with wfdb3.tx() as cc:
+                cc.execute("UPDATE jobs SET aspect_ratio=? WHERE id=?", (bj["aspect_ratio"], bj["id"]))
+            W = wf_main.wf()
+            r = await W.qc_job(bj["id"], force=True, vision=True)   # 走聚合层模拟视觉模型：返回不是 JSON
+            check("视觉质检：请求能发出（含图片），结果不可解析时只留技术分并写明原因",
+                  not r["vision"] and "视觉模型没给出" in r["note"], json.dumps({k: r[k] for k in ("note", "vision", "summary")}, ensure_ascii=False)[:300])
+            orig_chat = W.agg.chat
+
+            async def fake_chat(model, messages, **kw):
+                imgs = sum(1 for p in messages[0]["content"] if p.get("type") == "image_url")
+                return {"choices": [{"message": {"content": "```json\n" + json.dumps({
+                    "score": 58, "character_consistency": 40, "prompt_adherence": 80,
+                    "issues": [{"type": "角色不一致", "detail": f"共看了{imgs}张图，发色与定版图不同"}],
+                    "summary": "角色不一致"}, ensure_ascii=False) + "\n```"}}], "billing": {"charged_rmb": 0.01}}
+            W.agg.chat = fake_chat
+            try:
+                r = await W.qc_job(bj["id"], force=True, vision=True)
+            finally:
+                W.agg.chat = orig_chat
+            check("视觉质检：解析模型 JSON、低分判不合格、问题列出", r["vision"] and r["verdict"] == "fail"
+                  and r["character_consistency"] == 40 and any(i["type"] == "角色不一致" for i in r["issues"]),
+                  json.dumps(r, ensure_ascii=False)[:300])
+
+        vs = await j(await c.get(f"/api/voices?project={pid}"))
+        check("音色列表 + 角色自动分配音色", len(vs["voices"]) >= 20 and vs["characters"]
+              and all(x["voice"] in {v["id"] for v in vs["voices"]} for x in vs["characters"]),
+              json.dumps(vs.get("characters"), ensure_ascii=False)[:200])
+        ch0 = vs["characters"][0]
+        bad = await c.post(f"/assets/{ch0['asset_id']}/voice", json={"voice": "不存在"})
+        check("非法音色 400", bad.status_code == 400, str(bad.status_code))
+        await j(await c.post(f"/assets/{ch0['asset_id']}/voice", json={"voice": "Kai"}))
+        vs = await j(await c.get(f"/api/voices?project={pid}"))
+        check("指定音色生效", next(x for x in vs["characters"] if x["asset_id"] == ch0["asset_id"])["voice"] == "Kai"
+              and not next(x for x in vs["characters"] if x["asset_id"] == ch0["asset_id"])["auto"], "")
+        smp = await j(await c.post(f"/projects/{pid}/voice-sample", json={"voice": "Cherry"}))
+        check("试听音色：生成音频文件", smp["url"] and (await c.get(smp["url"])).status_code == 200, json.dumps(smp))
+        if HAS_FFMPEG:
+            st = await j(await c.get(f"/projects/{pid}"))
+            talk = next(s for s in st["shots"] if s["episode_no"] == 1 and s["dialogue"].strip()
+                        and s["job"] and s["job"]["status"] == "succeeded")
+            await c.patch(f"/shots/{talk['id']}", json={"expected_rev": talk["rev"], "fields": {
+                "dialogue": "孔宣（冷笑）：你也配？\n旁白：三百年后，人间股市。"}})
+            d = await j(await c.post(f"/projects/{pid}/dub", json={"shot_ids": [talk["id"]]}))
+            st = await j(await c.get(f"/projects/{pid}"))
+            sd = next(s for s in st["shots"] if s["id"] == talk["id"])["dub"]
+            check("配音：按句合成并排进镜头时长", d["dubbed"] == 1 and sd and len(sd["lines"]) == 2
+                  and sd["lines"][0]["start"] < sd["lines"][1]["start"] and sd["lines"][1]["end"] <= sd["seconds"] + 0.01,
+                  json.dumps(sd, ensure_ascii=False)[:300])
+            check("旁白用旁白音色、角色用角色音色", sd["lines"][1]["voice"] == st["settings"]["narrator_voice"]
+                  and sd["lines"][0]["speaker"] == "孔宣", json.dumps(sd["lines"], ensure_ascii=False)[:200])
+            info = media.probe(next(s for s in st["shots"] if s["id"] == talk["id"])["dub_path"])
+            check("配音轨时长 = 镜头时长", abs(info["duration"] - sd["seconds"]) < 0.15, json.dumps(info))
+            d2 = await j(await c.post(f"/projects/{pid}/dub", json={"shot_ids": [talk["id"]]}))
+            check("台词没变不重复配音（不重复扣费）", d2["dubbed"] == 0 and d2["skipped"] == 1, json.dumps(d2)[:200])
+            check("配音花费计入项目", st["spend"]["audio_rmb"] > 0, json.dumps(st["spend"]))
+            # 很长的台词 → 加速
+            long_line = "孔宣：" + "这一局我看得清清楚楚，量化也算不过我，" * 6
+            talk = next(s for s in st["shots"] if s["id"] == talk["id"])
+            await c.patch(f"/shots/{talk['id']}", json={"expected_rev": talk["rev"], "fields": {"dialogue": long_line}})
+            d3 = await j(await c.post(f"/projects/{pid}/dub", json={"shot_ids": [talk["id"]]}))
+            check("台词变了重新配音；太长会加速并提示超时长", d3["dubbed"] == 1 and d3["items"][0]["tempo"] > 1.0,
+                  json.dumps(d3, ensure_ascii=False)[:200])
+            await c.patch(f"/projects/{pid}/settings", json={"dub_mode": "mix", "bgm_material_id": ""})
+            a = await j(await c.post(f"/projects/{pid}/assemble?episode_no=1&allow_partial=true"))
+            st = await j(await c.get(f"/projects/{pid}"))
+            ep = st["episodes"][0]
+            info = media.probe(ep["final_path"])
+            srt = open(ep["srt_path"], encoding="utf-8").read()
+            check("成片混入配音：有音轨、字幕按配音时间", a["episodes"][0]["dubbed"] >= 1 and info["has_audio"]
+                  and "这一局我看得清清楚楚" in srt, json.dumps(a["episodes"][0], ensure_ascii=False)[:200])
+            await c.patch(f"/projects/{pid}/settings", json={"dub_mode": "replace"})
+            a = await j(await c.post(f"/projects/{pid}/assemble?episode_no=1&allow_partial=true"))
+            check("配音替换原声也能合成", a["episodes"][0]["dubbed"] >= 1, "")
+            bad = await c.patch(f"/projects/{pid}/settings", json={"dub_mode": "乱写"})
+            check("非法配音模式 400", bad.status_code == 400, "")
+            cl = await j(await c.delete(f"/projects/{pid}/dub"))
+            await c.patch(f"/projects/{pid}/settings", json={"dub_mode": "off"})
+            check("清除配音", cl["cleared"] >= 1, json.dumps(cl))
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

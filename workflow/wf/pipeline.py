@@ -16,6 +16,7 @@ from .assets_ops import AssetsMixin
 from .errors import BudgetExceeded, Conflict, NotFound, WorkflowError  # noqa: F401  (re-export)
 from .extras import ExtrasMixin
 from .util import new_id, short_hash
+from .qc_dub import QcDubMixin
 from .video_ops import ACTIVE_JOB, VideoMixin
 
 log = logging.getLogger("workflow.pipeline")
@@ -42,11 +43,18 @@ DEFAULT_SETTINGS = {
     "bgm_material_id": "",           # 成片配乐：本地素材里的音频
     "bgm_volume": 0.25,              # 配乐音量（0~1，压在镜头原声下面）
     "job_timeout_min": 45,           # 视频超过这么久没结果就取消并退回预扣
+    "auto_qc": True,                 # 出片后自动质检（真实出片才调视觉模型，约 1 分钱/镜）
+    "qc_model": "qwen3-vl-plus",
+    "qc_pass_score": 75,
+    "dub_mode": "off",               # off 保留原声 | mix 配音+原声垫底 | replace 只用配音
+    "dub_orig_volume": 0.35,         # mix 时原声音量
+    "narrator_voice": "Neil",        # 旁白音色
+    "tts_model": "qwen3-tts-flash",
 }
 SETTING_TYPES = {k: type(v) for k, v in DEFAULT_SETTINGS.items()}
 CHOICES = {"video_mode": ("auto", "text", "first_frame", "reference", "chain"), "engine": ("auto", "local"),
            "prompt_format": ("text", "json"), "image_resolution": ("1K", "2K", "4K"),
-           "aspect_ratio": ("9:16", "16:9", "1:1", "3:4", "4:3")}
+           "aspect_ratio": ("9:16", "16:9", "1:1", "3:4", "4:3"), "dub_mode": ("off", "mix", "replace")}
 
 EDITABLE = {
     "shot": {"duration_s", "scene", "size", "angle", "movement", "picture", "performance", "blocking",
@@ -64,7 +72,7 @@ _id = new_id
 _h = short_hash
 
 
-class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
+class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ExtrasMixin):
     def __init__(self, agg: Agg, auto_topup_rmb: float = 0.0):
         self.agg = agg
         self.auto_topup_rmb = auto_topup_rmb
@@ -239,9 +247,15 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
                 pr["stale"] = refs.stale(pr["bindings"], forms_by_id)
                 pr["suggestions"] = refs.suggest(pr["unresolved"], assets) if pr["unresolved"] else {}
             s["prompt"] = pr
+            dub = db.load(s.pop("dub_json", "") or "", {}) or {}
+            s["dub"] = ({**dub, "url": media.url_of(s["dub_path"])}
+                        if s.get("dub_path") and os.path.exists(s["dub_path"]) else None)
             s["jobs"] = jobs.get(s["id"], [])
             s["job"] = next((j for j in s["jobs"] if j["id"] == s["selected_job_id"]), None) \
                 or (s["jobs"][-1] if s["jobs"] else None)
+        vm = self.voice_map({"assets": assets})
+        for a in assets:   # 配音实际会用的音色（没指定时是自动分配的）
+            a["voice"] = vm[a["name"]]["voice"] if a["name"] in vm else ""
         kinds = {"character": "characters", "scene": "scenes", "prop": "props", "creature": "creatures"}
         for e in eps:
             e["cover_url"] = media.url_of(e.get("cover_path") or "")
@@ -279,13 +293,15 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
                                (pid,)).fetchone()["v"]
             blocks = c.execute("SELECT COALESCE(SUM(blocking_charged_rmb),0) v FROM scenes WHERE project_id=?",
                                (pid,)).fetchone()["v"]
-            text = c.execute("SELECT text_charged_rmb v FROM projects WHERE id=?", (pid,)).fetchone()["v"]
+            prow = c.execute("SELECT text_charged_rmb, audio_charged_rmb FROM projects WHERE id=?", (pid,)).fetchone()
+            text, audio = prow["text_charged_rmb"], prow["audio_charged_rmb"]
             covers = c.execute("SELECT COALESCE(SUM(cover_charged_rmb),0) v FROM episodes WHERE project_id=?",
                                (pid,)).fetchone()["v"]
         budget = float(self.settings(pid)["budget_rmb"])
         images = float(imgs) + float(frames) + float(blocks) + float(covers)
-        total = round(float(jobs) + images + float(text), 4)
+        total = round(float(jobs) + images + float(text) + float(audio), 4)
         return {"videos_rmb": round(float(jobs), 4), "images_rmb": round(images, 4), "text_rmb": round(float(text), 4),
+                "audio_rmb": round(float(audio), 4),
                 "total_rmb": total, "budget_rmb": budget, "remaining_rmb": round(budget - total, 4)}
 
     def refresh_status(self, pid: str) -> str:

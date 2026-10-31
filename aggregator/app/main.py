@@ -100,8 +100,19 @@ def bad(msg: str, status: int = 400, code: str | None = None, **extra):
 
 
 def est_tokens(messages: list[dict]) -> int:
-    chars = sum(len(str((m or {}).get("content", ""))) for m in messages or [])
-    return max(1, chars // 2)  # 中文近似 2 字符 ≈ 1 token，宁高勿低
+    """中文近似 2 字符 ≈ 1 token，宁高勿低；多模态消息里每张图按 1500 token 估（不能把 base64 长度当文字算）。"""
+    chars, images = 0, 0
+    for m in messages or []:
+        content = (m or {}).get("content", "")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in ("image_url", "input_image", "image"):
+                    images += 1
+                elif isinstance(part, dict):
+                    chars += len(str(part.get("text", "")))
+        else:
+            chars += len(str(content))
+    return max(1, chars // 2 + images * 1500)
 
 
 # ---------------- 基础 ----------------
@@ -345,6 +356,51 @@ async def image_generations(request: Request, x_user_id: str | None = Header(def
         "routing": {"provider": route.provider, "api_id": route.api_id,
                     "attempt": meta["attempt"], "latency_ms": meta["latency_ms"]},
     }
+    idem_put(idempotency_key, u, raw, payload)
+    return payload
+
+
+# ---------------- 语音合成 ----------------
+
+@app.post("/v1/audio/speech")
+async def audio_speech(request: Request, x_user_id: str | None = Header(default=None),
+                       idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+    """{model, input, voice, language_type?} → {url, characters, billing}。按字符计费、先预扣后结算。"""
+    raw = await request.body()
+    u = user_of(x_user_id)
+    cached = idem_get(idempotency_key, u, raw)
+    if cached:
+        return cached
+    body = json.loads(raw or b"{}")
+    model_id = body.get("model")
+    if model_id not in models() or models()[model_id].type != "tts":
+        return bad(f"not a tts model: {model_id}", 404, code="model_not_found")
+    text = str(body.get("input") or "").strip()
+    if not text:
+        return bad("input is required", 400, code="invalid_request")
+    if len(text) > 600:
+        return bad("单次最多 600 字", 400, code="too_long")
+    q = billing.quote(model_id, chars=len(text))
+    try:
+        hold = billing.reserve(u, q["rmb"], ref=f"tts:{model_id}", model=model_id)
+    except billing.InsufficientFunds as e:
+        return bad(str(e), 402, code="insufficient_funds", quote=q)
+    try:
+        route, result, meta = await router.call(
+            model_id, None, lambda r: prov.tts(providers()[r.provider], r.api_id,
+                                               {"text": text, "voice": body.get("voice") or "Cherry",
+                                                "language_type": body.get("language_type") or "Chinese"}))
+    except router.RouterExhausted as e:
+        billing.refund(hold, "tts failed")
+        return bad(str(e), 502, code="upstream_failed", attempts=e.attempts)
+    n = int(result.get("characters") or len(text))
+    actual = billing.quote(model_id, chars=n, route=route)
+    cost = billing.quote(model_id, chars=n, route=route, basis="cost")["rmb"]
+    billing.attach_provider(hold, route.provider, cost)
+    settled = billing.settle(hold, actual["rmb"], detail=f"tts:{model_id}:{route.provider}", cost_rmb=cost)
+    payload = {"url": result.get("url"), "characters": n, "voice": body.get("voice"),
+               "billing": {"quoted_rmb": q["rmb"], "charged_rmb": settled["charged_rmb"], "hold_id": hold},
+               "routing": {"provider": route.provider, "api_id": route.api_id}}
     idem_put(idempotency_key, u, raw, payload)
     return payload
 

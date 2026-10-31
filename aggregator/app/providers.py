@@ -78,9 +78,13 @@ async def chat(provider: Provider, api_id: str, payload: dict) -> dict:
     if not provider.live:
         await asyncio.sleep(0.01)
         last = (payload.get("messages") or [{}])[-1].get("content", "")
+        n_img = 0
+        if isinstance(last, list):   # 图文混合消息：只取文字部分，图片按 1500 token 计
+            n_img = sum(1 for p in last if isinstance(p, dict) and p.get("type") in ("image_url", "input_image"))
+            last = " ".join(str(p.get("text", "")) for p in last if isinstance(p, dict) and p.get("type") == "text")
         text = f"[mock:{provider.id}] " + last[:120]
         return {"content": text,
-                "usage": {"prompt_tokens": max(1, len(last) // 2),
+                "usage": {"prompt_tokens": max(1, len(last) // 2 + n_img * 1500),
                           "completion_tokens": max(1, len(text) // 2)},
                 "provider_model": api_id}
     body = {"model": api_id, **{k: v for k, v in payload.items() if k != "model"}}
@@ -180,6 +184,28 @@ async def image(provider: Provider, api_id: str, payload: dict) -> dict:
         raise ProviderError(provider.id, None, f"no image in response: {str(data)[:200]}")
     return {"images": images, "provider_model": data.get("model", api_id),
             "usage": {"images": len(images)}}
+
+
+# ---------------- tts ----------------
+
+async def tts(provider: Provider, api_id: str, payload: dict) -> dict:
+    if _mock_disabled(provider):
+        raise ProviderError(provider.id, 502, "mock injected failure")
+    text = payload.get("text", "")
+    if not provider.live:
+        await asyncio.sleep(0.01)
+        secs = round(max(0.6, len(text) * 0.22), 2)   # 中文约 4.5 字/秒
+        return {"url": f"https://mock.local/tts/{uuid.uuid4().hex[:8]}.wav?sec={secs}", "characters": len(text)}
+    if provider.kind == "dashscope_tts":
+        data = await _post(provider, "/services/aigc/multimodal-generation/generation",
+                           {"model": api_id, "input": {"text": text, "voice": payload.get("voice") or "Cherry",
+                                                       "language_type": payload.get("language_type") or "Chinese"}})
+        url = ((data.get("output") or {}).get("audio") or {}).get("url")
+        if not url:
+            raise ProviderError(provider.id, None, f"no audio in response: {str(data)[:200]}")
+        return {"url": url, "characters": (data.get("usage") or {}).get("characters") or len(text)}
+    data = await _post(provider, "/audio/speech", {"model": api_id, "input": text, "voice": payload.get("voice")})
+    return {"url": data.get("url"), "characters": len(text)}
 
 
 # ---------------- video ----------------

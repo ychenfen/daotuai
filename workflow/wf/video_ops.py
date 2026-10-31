@@ -13,6 +13,7 @@ from . import db, media
 from .agg import AggError
 from .errors import BudgetExceeded, Conflict, NotFound, WorkflowError
 from .util import new_id, short_hash
+from .qc_dub import qc_view
 
 log = logging.getLogger("workflow.video")
 
@@ -25,6 +26,7 @@ class VideoMixin:
         j["refs"] = db.load(j.pop("refs_json"), [])
         j["play_url"] = media.url_of(j["local_path"]) or ("" if media.is_mock_url(j["url"]) else j["url"])
         j["poster_url"] = media.url_of(j["poster_path"])
+        j["qc"] = qc_view(j.pop("qc_json", "") or "")
         return j
 
     async def model_info(self, model_id: str) -> dict:
@@ -517,6 +519,11 @@ class VideoMixin:
                 with db.tx() as c:
                     c.execute("UPDATE jobs SET status='running', updated_at=? WHERE id=?", (db.now(), j["id"]))
                 running.append({"job": j["id"], "shot": j["shot_id"], "code": code})
+        if done:
+            with db.tx() as c:
+                pids = {d["job"]: c.execute("SELECT s.project_id FROM jobs j JOIN shots s ON s.id=j.shot_id "
+                                            "WHERE j.id=?", (d["job"],)).fetchone()["project_id"] for d in done}
+            self._schedule_auto_qc([(p, jid) for jid, p in pids.items()])
         for p, evs in projects.items():
             self.refresh_status(p)
             ok = [c for k, c in evs if k == "ok"]
@@ -616,12 +623,22 @@ class VideoMixin:
             shots = [s for s in proj["shots"] if s["episode_id"] == ep["id"]]
             if not shots:
                 continue
+            dub_mode = st.get("dub_mode") or "off"
+            if dub_mode != "off":   # 配音模式：缺的/台词改过的镜头先补配音（已有且没变的会跳过）
+                ready = [s["id"] for s in shots if s["job"] and s["job"]["status"] == "succeeded"]
+                if ready:
+                    await self.dub_shots(pid, shot_ids=ready)
+                    shots = [s for s in self.get(pid)["shots"] if s["episode_id"] == ep["id"]]
             clips, missing = [], []
             for s in shots:
                 j = s["job"] if s["job"] and s["job"]["status"] == "succeeded" else None
                 if j and j["local_path"] and os.path.exists(j["local_path"]):
-                    clips.append({"path": j["local_path"], "seconds": j["seconds"],
-                                  "dialogue": self._subtitle_text(s["dialogue"])})
+                    clip = {"path": j["local_path"], "seconds": j["seconds"],
+                            "dialogue": self._subtitle_text(s["dialogue"])}
+                    if dub_mode != "off" and s.get("dub"):
+                        clip["dub"] = s["dub_path"]
+                        clip["subs"] = [(x["start"], x["end"], x["text"]) for x in s["dub"].get("lines", [])]
+                    clips.append(clip)
                 else:
                     missing.append(s["code"])
             if missing and not allow_partial:
@@ -634,13 +651,14 @@ class VideoMixin:
             bgm = next((x["local_path"] for x in proj["materials"] if x["id"] == st.get("bgm_material_id")
                         and x["media_type"] == "audio"), "")
             r = await media.assemble(clips, final, srt, st["aspect_ratio"], st["burn_subtitles"], bgm,
-                                     float(st.get("bgm_volume") or 0.25))
+                                     float(st.get("bgm_volume") or 0.25), dub_mode,
+                                     float(st.get("dub_orig_volume") if st.get("dub_orig_volume") is not None else 0.35))
             with db.tx() as c:
                 c.execute("UPDATE episodes SET final_path=?, srt_path=?, final_seconds=?, final_at=? WHERE id=?",
                           (final, srt, r["seconds"], db.now(), ep["id"]))
             out.append({"episode": ep["no"], "url": media.url_of(final), "srt_url": media.url_of(srt),
                         "seconds": r["seconds"], "clips": r["clips"], "missing": missing,
-                        "subtitles": r["subtitles"]})
+                        "subtitles": r["subtitles"], "dubbed": r.get("dubbed", 0)})
         if not out:
             raise WorkflowError("没有可合成的剧集（先把视频跑完）")
         self.refresh_status(pid)

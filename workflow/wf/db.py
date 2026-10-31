@@ -289,6 +289,11 @@ MIGRATIONS = [
     ("projects", "text_charged_rmb", "REAL NOT NULL DEFAULT 0"),
     ("episodes", "cover_path", "TEXT NOT NULL DEFAULT ''"),
     ("episodes", "cover_charged_rmb", "REAL NOT NULL DEFAULT 0"),
+    ("jobs", "qc_json", "TEXT NOT NULL DEFAULT ''"),              # 自动质检结果
+    ("assets", "tts_voice", "TEXT NOT NULL DEFAULT ''"),          # 角色配音音色（空=自动分配）
+    ("shots", "dub_path", "TEXT NOT NULL DEFAULT ''"),            # 本镜配音轨（wav）
+    ("shots", "dub_json", "TEXT NOT NULL DEFAULT ''"),            # 配音分句与时间
+    ("projects", "audio_charged_rmb", "REAL NOT NULL DEFAULT 0"), # 配音/试听花费
 ]
 
 

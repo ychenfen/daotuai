@@ -14,6 +14,23 @@ models:
       - { provider: deepseek, api_id: deepseek-chat, weight: 2 }
       - { provider: dashscope, api_id: deepseek-v4-pro, weight: 1 }   # 百炼上的 DeepSeek 做备用线路
 
+  - id: qwen3-vl-plus          # 视觉理解：自动质检用（看抽帧 + 定版图）
+    type: chat
+    context: 128000
+    unit: tokens
+    price: { input_rmb_per_m: 1.0, output_rmb_per_m: 10.0 }   # 32K 内档位（第三方价目，以百炼为准）
+    cost: { input_rmb_per_m: 1.0, output_rmb_per_m: 10.0 }
+    routes:
+      - { provider: dashscope, api_id: qwen3-vl-plus, weight: 1 }
+
+  - id: qwen3-tts-flash         # 语音合成：配音 / 旁白（48 个音色，含方言；单次 ≤600 字）
+    type: tts
+    unit: char
+    price: { rmb_per_10k_chars: 0.8 }   # 估算，以百炼账单为准
+    cost: { rmb_per_10k_chars: 0.8 }
+    routes:
+      - { provider: dashscope_tts, api_id: qwen3-tts-flash, weight: 1 }
+
   - id: qwen-plus
     type: chat
     context: 128000

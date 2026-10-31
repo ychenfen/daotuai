@@ -2,7 +2,7 @@
 'use strict';
 const S = {page: 'home', pid: null, p: null, list: [], models: [], health: null, ep: null, timer: null,
   assetKind: 'all', assetQ: '', sceneId: null, sceneFilter: 'all', shotId: null, sel: new Set(), chatSid: null,
-  notif: {items: [], unread: 0}, notifOpen: false, vp: {}};
+  notif: {items: [], unread: 0}, notifOpen: false, vp: {}, voices: []};
 const PAGES = [['home', '⌂', '首页'], ['script', '✎', '剧本'], ['assets', '▣', '资产'], ['board', '▤', '分镜'],
   ['blocking', '⌖', '站位图'], ['prompts', '❝', '提示词'], ['videos', '▶', '视频'], ['final', '🎬', '成片'],
   ['chat', '💬', '对话'], ['help', '?', '教程']];
@@ -14,6 +14,11 @@ const STATUS = {draft: '草稿', script_ready: '剧本就绪', parsed: '已解�
   submitted: '已提交', running: '生成中', succeeded: '成功', failed: '失败', cancelled: '已取消', queued: '排队'};
 const MODE = {auto: '自动', reference: '全能参考', first_frame: '首帧参考', chain: '接上一镜尾帧', text: '文生视频'};
 const JOB_MODE = {...MODE, video_edit: '视频编辑', motion_transfer: '动作迁移'};
+const DUB = {off: '保留视频原声', mix: '配音为主 + 原声垫底', replace: '只用配音（替换原声）'};
+const QC = {pass: ['ok', '合格'], warn: ['warn', '待看'], fail: ['bad', '不合格']};
+const qcBadge = q => q ? `<span class="badge ${QC[q.verdict][0]}" title="${esc(q.summary)}">质检 ${q.score} · ${QC[q.verdict][1]}</span>` : '';
+const voiceName = id => (S.voices.find(v => v.id === id) || {label: id}).label;
+const voiceOpts = cur => S.voices.map(v => `<option value="${esc(v.id)}" ${v.id === cur ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
 const TOOLS = [['shot', '分镜视频'], ['video_edit', '视频编辑 · Omni Flash'], ['motion_transfer', '动作迁移 · Wan 2.2']];
 
 // ---------------- 工具 ----------------
@@ -113,7 +118,7 @@ function renderChrome() {
   const p = S.p, sp = p && p.spend, t = p && p.task, busy = t && (t.status === 'running' || t.status === 'queued');
   const pct = sp ? (sp.budget_rmb > 0 ? Math.min(100, sp.total_rmb / sp.budget_rmb * 100) : 100) : 0;
   $('#top').innerHTML = `<span class="title">${esc((PAGES.find(x => x[0] === S.page) || [])[2] || '')}</span>
-    ${sp ? `<span class="pill" title="视频 ${rmb(sp.videos_rmb)} · 图片 ${rmb(sp.images_rmb)} · 文本 ${rmb(sp.text_rmb || 0)}（预算只卡视频与图片的提交）">已花 <b>${rmb(sp.total_rmb)}</b> / ${rmb(sp.budget_rmb)}
+    ${sp ? `<span class="pill" title="视频 ${rmb(sp.videos_rmb)} · 图片 ${rmb(sp.images_rmb)} · 文本 ${rmb(sp.text_rmb || 0)} · 配音 ${rmb(sp.audio_rmb || 0)}（超出预算的出片、出图、配音不会提交）">已花 <b>${rmb(sp.total_rmb)}</b> / ${rmb(sp.budget_rmb)}
       <span class="meter"><div class="${pct >= 100 ? 'over' : ''}" style="width:${pct}%"></div></span></span>` : ''}
     ${t ? `<span class="pill" title="${esc(t.error || '')}">任务 ${badge(t.status)} ${(t.steps || []).filter(s => s.status === 'succeeded').length}/${(t.steps || []).length || '…'}</span>` : ''}
     <span class="spacer"></span>
@@ -128,7 +133,7 @@ function renderChrome() {
 function notifPanel() {
   return `<div class="card drop"><div class="row"><b>通知中心</b><span class="spacer"></span>
     <button class="small" onclick="act(this,()=>api('POST','/notifications/read',{}),'已全部标为已读')">全部已读</button></div>
-    ${S.notif.items.map(n => `<div class="notif ${n.read ? '' : 'unread'}"><b class="${n.level === 'error' ? 'err' : n.level === 'success' ? 'ok' : ''}">${esc(n.title)}</b>
+    ${S.notif.items.map(n => `<div class="notif ${n.read ? '' : 'unread'}"><b class="${n.level === 'error' ? 'err' : n.level === 'success' ? 'ok' : n.level === 'warning' ? 'warnc' : ''}">${esc(n.title)}</b>
       <div class="small muted">${esc(n.project_name)} · ${esc(n.created_at)} UTC</div>${n.body ? `<div class="small">${esc(n.body)}</div>` : ''}</div>`).join('') || '<div class="muted">暂无通知</div>'}</div>`;
 }
 function toggleNotif() { S.notifOpen = !S.notifOpen; renderChrome(); }
@@ -240,6 +245,13 @@ function settingsModal() {
     <span>成片配乐</span><select data-k="bgm_material_id"><option value="">不加配乐</option>${S.p.materials.filter(m => m.media_type === 'audio').map(m => `<option value="${m.id}" ${m.id === st.bgm_material_id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
     <span>配乐音量（0~1）</span><input data-k="bgm_volume" type="number" min="0" max="1" step="0.05" value="${st.bgm_volume}">
     <span>视频超时（分钟）</span><input data-k="job_timeout_min" type="number" min="5" max="600" step="5" value="${st.job_timeout_min}">
+    <span>成片配音方式</span>${sel('dub_mode', Object.entries(DUB))}
+    <span>配音时原声音量（0~1）</span><input data-k="dub_orig_volume" type="number" min="0" max="1" step="0.05" value="${st.dub_orig_volume}">
+    <span>旁白音色</span><select data-k="narrator_voice">${voiceOpts(st.narrator_voice)}</select>
+    <span>配音模型</span><select data-k="tts_model">${opt(by('tts'), st.tts_model)}</select>
+    <span>质检视觉模型</span><select data-k="qc_model">${opt(by('chat').filter(m => /vl|vision|gpt|gemini/i.test(m.id)), st.qc_model)}</select>
+    <span>质检合格分</span><input data-k="qc_pass_score" type="number" min="0" max="100" step="5" value="${st.qc_pass_score}">
+    ${tog('auto_qc', '出片后自动质检')}
     ${tog('gen_asset_images', '一键时资产出图')}${tog('gen_blocking', '一键时生成站位图')}${tog('use_blocking_ref', '站位图作为出片参考')}
     ${tog('gen_frames', '一键时生成分镜图')}${tog('auto_assemble', '一键最后自动合成')}${tog('burn_subtitles', '字幕烧进画面')}
   </div><div class="row" style="margin-top:12px"><span class="muted small">“真实”模型会真实调用并扣费；“模拟”零成本，用来走通流程。超出项目预算的视频不会提交。</span>
@@ -344,6 +356,7 @@ function assetCard(a) {
     <div class="row" style="margin-top:8px"><b>${esc(a.name)}</b><span class="spacer"></span><span class="badge">${KIND[a.kind]}</span></div>
     <div style="margin-top:4px">${a.forms.map(f => `<span class="chip click ${f.is_default ? 'on' : ''}" onclick="assetDetail('${a.id}','${f.id}')">${esc(f.name)} <span class="dot ${f.current_version ? 'ok' : ''}"></span></span>`).join('')}</div>
     <div class="small muted" style="margin-top:4px">适用集数：${a.episodes.length ? a.episodes.map(n => '第' + n + '集').join('、') : '—'} · 引用 ${a.usage} 次${a.aliases.length ? ' · 别称：' + esc(a.aliases.join('、')) : ''}</div>
+    ${['character', 'creature'].includes(a.kind) ? voiceRow(a) : ''}
     <div class="row" style="margin-top:8px"><button class="small" onclick="assetDetail('${a.id}')">编辑 / 历史版本</button>
       ${a.kind !== 'audio' ? `<button class="small" onclick="genForm('${a.default_form_id}',this)">${a.current_version ? '重新出图' : '生成图片'}</button>` : ''}
       <button class="small" onclick="uploadForm('${a.default_form_id}','${a.kind}')">上传</button><span class="spacer"></span>
@@ -634,7 +647,10 @@ function pgVideos() {
     <button class="primary" onclick="batchGen(this)">批量生成${S.sel.size ? `（${S.sel.size}）` : '（未出片的）'}</button>
     <a href="/projects/${S.pid}/download?what=videos&episode_no=${e.no}"><button ${doneN ? '' : 'disabled'}>批量下载</button></a>
     <a href="/projects/${S.pid}/edit-package?episode_no=${e.no}"><button ${doneN ? '' : 'disabled'} title="编号片段 + 字幕 + EDL/FCPXML，Premiere/达芬奇/剪映可用">导出剪辑工程</button></a>
-    <button onclick="act(this,()=>api('POST','/projects/${S.pid}/videos/poll'),'已刷新回执')">刷新回执</button></div></div>`;
+    <button onclick="qcEpisode(this,${e.no})" ${doneN ? '' : 'disabled'} title="技术检查 + 视觉模型核对人物一致性/画面/字幕水印">质检本集</button>
+    <button onclick="dubEpisode(this,${e.no})" title="按台词用角色音色合成配音轨">配音本集</button>
+    <button onclick="act(this,()=>api('POST','/projects/${S.pid}/videos/poll'),'已刷新回执')">刷新回执</button></div>
+    ${qcSummary(shots)}</div>`;
   if (!s) return head + '<div class="empty">本集没有卡片</div>';
   if (S.vtool !== 'shot') return head + toolPanel(s, shots);
   const P = vp(), m = model(P.model), st = S.p.settings;
@@ -669,15 +685,16 @@ function pgVideos() {
   <div><div class="card"><div class="row"><b>镜头 ${s.code}</b>${badge(s.status)}<span class="spacer"></span><span class="muted small">${s.duration_s}s</span></div>
       ${j && j.play_url ? `<video id="player" controls preload="metadata" poster="${esc(j.poster_url || '')}" src="${esc(j.play_url)}" style="margin-top:8px"></video>`
         : `<div class="thumb ${S.p.settings.aspect_ratio === '9:16' ? 'tall' : ''} ph small" style="margin-top:8px">${j && (j.status === 'submitted' || j.status === 'running') ? '生成中…' : '选择镜头或历史版本，在此查看成片'}</div>`}
-      ${j && j.error ? `<div class="err small">${esc(j.error)}</div>` : ''}</div>
+      ${j && j.error ? `<div class="err small">${esc(j.error)}</div>` : ''}
+      ${j && j.status === 'succeeded' ? qcPanel(j) : ''}${dubPanel(s)}</div>
     <div class="card"><h3>历史版本</h3>${s.jobs.slice().reverse().map(x => `<div class="row small" style="padding:6px 0;border-bottom:1px solid var(--line)">
-      <b>v${x.version}</b>${badge(x.status)}<span class="muted">${esc(JOB_MODE[x.mode] || x.mode)} · ${esc(x.model)} · ${esc(x.resolution)} · ${x.duration_s}s · ${rmb(x.charged_rmb || x.quoted_rmb)}</span><span class="spacer"></span>
+      <b>v${x.version}</b>${badge(x.status)}${qcBadge(x.qc)}<span class="muted">${esc(JOB_MODE[x.mode] || x.mode)} · ${esc(x.model)} · ${esc(x.resolution)} · ${x.duration_s}s · ${rmb(x.charged_rmb || x.quoted_rmb)}</span><span class="spacer"></span>
       ${x.status === 'succeeded' ? (x.id === s.selected_job_id ? '<span class="ok">当前</span>' : `<button class="small" onclick="act(this,()=>api('POST','/shots/${s.id}/select?job_id=${x.id}'),'已选用 v${x.version}')">选用</button>`)
         + `<button class="small" onclick="voiceModal('${x.id}')">截音色</button>${x.play_url ? `<a class="small" href="${esc(x.play_url)}" download>下载</a>` : ''}` : ''}
       ${x.status === 'submitted' || x.status === 'running' ? `<button class="small danger" onclick="act(this,()=>api('POST','/jobs/${x.id}/cancel'),'已取消')">取消</button>` : ''}</div>`).join('') || '<div class="muted small">生成完成后，历史版本会显示在这里。</div>'}</div>
     <div class="card"><h3>镜头目录</h3><div class="grid sm">${shots.map(x => `<div class="shot ${x.id === S.shotId ? 'sel' : ''}" style="cursor:pointer" onclick="S.shotId='${x.id}';render()">
       <div class="hd"><label onclick="event.stopPropagation()"><input type="checkbox" ${S.sel.has(x.id) ? 'checked' : ''} onchange="this.checked?S.sel.add('${x.id}'):S.sel.delete('${x.id}');render()"></label>
-        <b>${x.code}</b><span class="small muted">${x.duration_s}s</span></div>
+        <b>${x.code}</b><span class="small muted">${x.duration_s}s</span>${x.job && x.job.qc ? `<span class="dot ${QC[x.job.qc.verdict][0]}" title="质检 ${x.job.qc.score}"></span>` : ''}${x.dub ? '<span class="small" title="已配音">🎙</span>' : ''}</div>
       <div class="bd">${x.job && x.job.poster_url ? `<img src="${esc(x.job.poster_url)}" class="thumb">` : `<div class="small">${badge(x.status)}</div>`}</div></div>`).join('')}</div></div></div></div>`;
 }
 function toolPanel(s, shots) {
@@ -768,6 +785,63 @@ async function extractVoice(jid, btn) {
   if (r) closeModal(btn);
 }
 
+// ---------------- 质检 / 配音 ----------------
+function qcSummary(shots) {
+  const qs = shots.map(s => s.job && s.job.qc).filter(Boolean);
+  if (!qs.length) return '';
+  const n = k => qs.filter(q => q.verdict === k).length;
+  const bad = shots.filter(s => s.job && s.job.qc && s.job.qc.verdict === 'fail');
+  return `<div class="row small" style="margin-top:8px"><span class="muted">质检</span><span class="badge ok">合格 ${n('pass')}</span><span class="badge warn">待看 ${n('warn')}</span><span class="badge bad">不合格 ${n('fail')}</span>
+    ${bad.length ? `<span class="muted">不合格：</span>${bad.map(s => `<span class="chip click" onclick="S.shotId='${s.id}';render()">${s.code}</span>`).join('')}
+    <button class="small" onclick="S.sel=new Set(${esc(JSON.stringify(bad.map(s => s.id)))});render()">选中不合格的</button>` : ''}</div>`;
+}
+function qcPanel(j) {
+  const q = j.qc;
+  if (!q) return `<div class="row small" style="margin-top:8px"><span class="muted">还没质检</span><span class="spacer"></span><button class="small" onclick="qcJob('${j.id}',this)">质检这个版本</button></div>`;
+  return `<div class="card" style="margin:8px 0 0;padding:10px"><div class="row">${qcBadge(q)}
+    ${q.character_consistency != null ? `<span class="small muted">人物一致 ${q.character_consistency} · 符合分镜 ${q.prompt_adherence}</span>` : ''}
+    <span class="spacer"></span><button class="small" onclick="qcJob('${j.id}',this)">重新质检</button></div>
+    <div class="small" style="margin-top:6px">${esc(q.summary)}</div>
+    ${q.issues.length ? `<ul class="small" style="margin:6px 0 0 18px;padding:0">${q.issues.map(i => `<li><b>${esc(i.type)}</b>：${esc(i.detail)}</li>`).join('')}</ul>` : ''}
+    <div class="small muted" style="margin-top:4px">${q.checks.map(c => `${c.ok ? '✓' : '✗'} ${esc(c.name)}（${esc(c.detail)}）`).join(' · ')}</div>
+    ${q.note ? `<div class="small muted">${esc(q.note)}</div>` : ''}
+    ${q.frame_urls.length ? `<div class="row" style="margin-top:6px;gap:4px">${q.frame_urls.map(u => `<a href="${esc(u)}" target="_blank"><img src="${esc(u)}" style="height:64px;border-radius:4px"></a>`).join('')}</div>` : ''}</div>`;
+}
+function dubPanel(s) {
+  const d = s.dub, lines = s.dialogue && s.dialogue.trim();
+  if (!lines) return '';
+  return `<div class="card" style="margin:8px 0 0;padding:10px"><div class="row"><b class="small">配音</b>
+    ${d ? `<span class="small muted">${d.lines.length} 句${d.tempo > 1.001 ? ` · 加速 ${d.tempo}×` : ''}</span>${d.overflow ? '<span class="badge warn">台词超出镜头时长，已截断</span>' : ''}` : '<span class="small muted">还没配音</span>'}
+    <span class="spacer"></span><button class="small" onclick="dubShot('${s.id}',this)">${d ? '重新配音' : '配音本镜'}</button>
+    ${d ? `<button class="small ghost" onclick="act(this,()=>api('DELETE','/projects/${S.pid}/dub?shot_id=${s.id}'),'已清除配音')">清除</button>` : ''}</div>
+    ${d ? `<audio controls src="${esc(d.url)}" style="margin-top:6px;width:100%"></audio>
+      <div class="small muted">${d.lines.map(x => `${x.start.toFixed(1)}s ${esc(x.speaker)}（${esc(voiceName(x.voice))}）：${esc(x.text)}`).join('<br>')}</div>` : ''}</div>`;
+}
+function voiceRow(a) {
+  return `<div class="row small" style="margin-top:6px;gap:6px"><span class="muted">配音</span>
+    <select style="flex:1;min-width:0" onchange="setVoice('${a.id}',this.value)"><option value="">自动（${esc(voiceName(a.voice))}）</option>${voiceOpts(a.tts_voice)}</select>
+    <button class="small" title="试听（真实配音模型会扣 1 分钱以内）" onclick="sampleVoice(this,'${a.id}')">▶ 试听</button></div>`;
+}
+async function setVoice(aid, voice) { await act(null, () => api('POST', `/assets/${aid}/voice`, {voice}), voice ? '已设置音色：' + voiceName(voice) : '改为自动分配'); }
+async function sampleVoice(btn, aid) {
+  const vs = await api('GET', `/api/voices?project=${S.pid}`), c = vs.characters.find(x => x.asset_id === aid);
+  if (!c) return;
+  const r = await act(btn, () => api('POST', `/projects/${S.pid}/voice-sample`, {voice: c.voice, text: `我是${c.name}，这是我的声音。`}), `试听：${voiceName(c.voice)}${c.auto ? '（自动分配）' : ''}`);
+  if (r) new Audio(r.url).play().catch(() => {});
+}
+async function qcJob(jid, btn) { await act(btn, () => api('POST', `/jobs/${jid}/qc`), r => `质检 ${r.score} 分 · ${QC[r.verdict][1]}`); }
+async function qcEpisode(btn, epNo) {
+  await act(btn, () => api('POST', `/projects/${S.pid}/qc`, {episode_no: epNo, force: true}), r => `质检 ${r.checked} 镜：合格 ${r.pass} · 待看 ${r.warn} · 不合格 ${r.fail}`);
+}
+async function dubShot(sid, btn) {
+  if (!confirmCost([S.p.settings.tts_model], '配音')) return;
+  await act(btn, () => api('POST', `/projects/${S.pid}/dub`, {shot_ids: [sid], force: true}), r => `已配音（${rmb(r.charged_rmb)}）`);
+}
+async function dubEpisode(btn, epNo) {
+  if (!confirmCost([S.p.settings.tts_model], '配音本集')) return;
+  await act(btn, () => api('POST', `/projects/${S.pid}/dub`, {episode_no: epNo}), r => `配音 ${r.dubbed} 镜，跳过 ${r.skipped} 镜（${rmb(r.charged_rmb)}）${r.errors && r.errors.length ? '，失败 ' + r.errors.length : ''}`);
+}
+
 // ---------------- 成片 ----------------
 function pgFinal() {
   const st = S.p.settings;
@@ -778,6 +852,9 @@ function pgFinal() {
     <a href="/projects/${S.pid}/download?what=finals"><button>下载全部成片</button></a>
     <a href="/projects/${S.pid}/edit-package"><button title="编号片段 + 字幕 + EDL/FCPXML">导出剪辑工程</button></a>
     <button onclick="genCovers(this,null)">生成全部封面</button></div>
+    <div class="row" style="margin-top:8px"><label class="small">配音<select onchange="act(null,()=>api('PATCH','/projects/${S.pid}/settings',{dub_mode:this.value}),'已保存')">${Object.entries(DUB).map(([k, v]) => `<option value="${k}" ${st.dub_mode === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <span class="small muted">${st.dub_mode === 'off' ? '用视频模型自带的台词声音' : `合成时自动给缺配音的镜头补配音（旁白：${esc(voiceName(st.narrator_voice))}）`}</span>
+      <span class="spacer"></span><button class="small" onclick="go('assets')">设置角色音色</button></div>
     <div class="small muted" style="margin-top:6px">配乐：${st.bgm_material_id ? '已选 ' + esc((S.p.materials.find(m => m.id === st.bgm_material_id) || {}).name || '') + `，音量 ${st.bgm_volume}` : '未设置（在“生成设置”里选一段上传的音频）'}</div></div>
   <div class="grid">${S.p.episodes.map(e => `<div class="card"><div class="row"><b>${esc(e.title)}</b>${e.final_url ? `<span class="badge ok">${e.final_seconds.toFixed(1)} 秒</span>` : '<span class="badge">未合成</span>'}
     <span class="spacer"></span><span class="small muted">${e.videos_done}/${e.shots} 镜头已出片</span></div>
@@ -785,6 +862,7 @@ function pgFinal() {
     ${e.final_url ? `<video controls src="${esc(e.final_url)}" style="margin-top:8px"></video><div class="row" style="margin-top:6px"><a href="${esc(e.final_url)}" download>下载视频</a><a href="${esc(e.srt_url)}" download>下载字幕</a></div>` : ''}
     <div class="row" style="margin-top:8px"><button class="small" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?episode_no=${e.no}'),'已合成')">合成本集</button>
       <button class="small" onclick="S.ep=${e.no};go('videos')">去视频页</button>
+      <button class="small" onclick="dubEpisode(this,${e.no})">配音本集</button><button class="small" onclick="qcEpisode(this,${e.no})">质检本集</button>
       <button class="small" onclick="genCovers(this,${e.no})">${e.cover_url ? '重做封面' : '生成封面'}</button></div></div>`).join('') || '<div class="empty">还没分集</div>'}</div>`;
 }
 
@@ -837,7 +915,7 @@ function pgHelp() {
   const step = (t, sub, items, page) => `<div class="card"><h3>${t}</h3><div class="muted small">${sub}</div><ol>${items.map(x => `<li>${x}</li>`).join('')}</ol>
     ${page ? `<button onclick="go('${page}')">前往${(PAGES.find(p => p[0] === page) || [])[2]}</button>` : ''}</div>`;
   return `<div class="card"><div class="muted small">短剧工作台 v0.3 · 本机项目、资产版本、站位图、提示词、视频任务和成片，一次讲清</div>
-    <h2 style="margin:6px 0">从剧本到成片</h2><div class="flow">${['项目', '剧本', '资产', '分镜', '站位图', '提示词', '视频', '成片'].map(x => `<span>${x}</span>`).join('→')}</div>
+    <h2 style="margin:6px 0">从剧本到成片</h2><div class="flow">${['项目', '剧本', '资产', '分镜', '站位图', '提示词', '视频', '质检', '配音', '成片'].map(x => `<span>${x}</span>`).join('→')}</div>
     <div class="small muted" style="margin-top:8px">模型分“真实 / 模拟”：模拟零成本，用来练手和走流程；真实会扣费，受项目预算约束（超预算的视频不会提交）。</div></div>
   <div class="grid tut">
     ${step('创建项目', '剧本、资产、分镜、成片和历史版本都保存在本机。', ['在首页新建项目并选择风格（真人 / 3D / 2D）。', '项目可以设封面、置顶、下载（导出项目包）；别人用“上传项目”导入。', '右上角“生成设置”选模型、清晰度、画面比例和预算。'], 'home')}
@@ -847,6 +925,8 @@ function pgHelp() {
     ${step('站位图', '每个场次一张，人物到场后的位置关系，同场景分镜共用。', ['先确保场景和角色有图（右侧会提示“需核对素材”）。', '一键生成本集，或逐场生成；可写站位说明。', '出片选“全能参考”时自动带上站位图。'], 'blocking')}
     ${step('转换并精修视频提示词', '格式：参考资产前缀 + 【镜头】时间轴 + 音效约束。', ['“生成最终提示词”走模型，“本地转换”零费用，“剧本直转提示词”跳过手动分镜。', '用 @名字 或 @名字（形态）引用资产；红色“未找到”要修正，黄色“已更新”表示资产换过图。'], 'prompts')}
     ${step('配置视频卡片并提交', '单镜可改参考模式、模型、分辨率、比例、时长和参考素材。', ['先“报价”看积分，再“生成当前镜头”；或勾选多个镜头“批量生成”。', '每次生成都是新版本，历史版本可选用、下载、截音色。', '失败自动退回预扣；刷新回执或等后台自动轮询。'], 'videos')}
+    ${step('自动质检', '每个版本出片后自动打分，不合格的标红，方便集中重抽。', ['技术检查：时长、画幅、分辨率、有台词却没声音。', '视觉检查（真实出片时）：抽 4 帧对照角色定版图，看人物是否一致、是否符合分镜、有无字幕水印和崩坏；约 1 分钱/镜。', '视频页点“质检本集”统一复查；“选中不合格的”后直接批量重新生成。'], 'videos')}
+    ${step('配音 / 旁白', '给角色指定音色，按台词逐句合成配音轨。', ['资产页每个角色卡下选音色、点“试听”；不选会按角色自动分配。旁白音色在“生成设置”里。', '台词写成“角色：台词”，“旁白：…”或没写说话人的行用旁白音色；括号里的表演提示不会读出来。', '台词太长会自动加速（最多 1.35 倍），仍放不下会提示“超出镜头时长”。', '成片页选配音方式：保留原声 / 配音为主 + 原声垫底 / 只用配音；字幕按配音的真实时间对齐。'], 'final')}
     ${step('合成成片', '按集拼接选中的版本，自动出字幕。', ['“合成全部剧集”或单集合成；可选择把字幕烧进画面。', '下载 mp4 和 srt，导入剪辑软件继续精修。'], 'final')}
   </div>`;
 }
@@ -871,6 +951,7 @@ function showConflict(err) {
     if (S.health.aggregator) S.models = (await api('GET', '/api/models')).items;
     else toast('聚合层没连上（8010），模型列表为空；请用“启动工作台”同时启动两个服务', true);
   } catch (e) { toast('后端连不上：' + e.message, true); }
+  try { S.voices = (await api('GET', '/api/voices')).voices; } catch (e) { /* 音色列表拿不到不影响其他功能 */ }
   document.addEventListener('click', e => { if (S.notifOpen && !e.target.closest('.rel')) { S.notifOpen = false; renderChrome(); } });
   window.addEventListener('hashchange', () => { const [, pg, id] = location.hash.split('/'); if (pg && pg !== S.page) { S.page = pg; S.pid = id || S.pid; load(); } });
   await load();

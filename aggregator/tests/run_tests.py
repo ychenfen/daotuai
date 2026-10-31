@@ -55,9 +55,9 @@ async def main() -> int:
     async with httpx.AsyncClient(transport=transport, base_url="http://agg") as c:
         print("\n[A] 模型目录与定价")
         h = (await c.get("/healthz")).json()
-        check("healthz ok", h.get("ok") is True and h["providers"] == 23 and h["models"] == 23, str(h))
+        check("healthz ok", h.get("ok") is True and h["providers"] == 24 and h["models"] == 25, str(h))
         ms = (await c.get("/v1/models")).json()["data"]
-        check("模型目录 23 个", len(ms) == 23, str(len(ms)))
+        check("模型目录 25 个", len(ms) == 25, str(len(ms)))
         check("强制 mock 时没有真实线路", not any(m["live"] for m in ms), str([m["id"] for m in ms if m["live"]]))
 
         q = (await c.post("/v1/quote", json={"model": "gpt-6.1-sol", "in_tokens": 1_000_000,
@@ -230,6 +230,24 @@ async def main() -> int:
         check("取消全额退回", near(cc["refund"]["refunded_rmb"], 3.2), json.dumps(cc["refund"]))
         rec3 = (await c.get("/admin/reconcile")).json()
         check("取消后账本仍平", near(rec3["drift_rmb"], 0.0), json.dumps(rec3)[:200])
+
+        print("\n[I] 语音合成 / 视觉消息")
+        t = await c.post("/v1/audio/speech", headers=U, json={"model": "qwen3-tts-flash", "input": "三百年后，人间股市。",
+                                                              "voice": "Neil"})
+        tj = t.json()
+        check("TTS：返回音频地址并按字符结算", t.status_code == 200 and tj["url"] and tj["characters"] == 10
+              and tj["billing"]["charged_rmb"] > 0, json.dumps(tj, ensure_ascii=False)[:200])
+        t = await c.post("/v1/audio/speech", headers=U, json={"model": "qwen3-tts-flash", "input": "字" * 601})
+        check("TTS：超过 600 字 400", t.status_code == 400, str(t.status_code))
+        t = await c.post("/v1/audio/speech", headers=U, json={"model": "deepseek-chat", "input": "x"})
+        check("TTS：非语音模型 404", t.status_code == 404, str(t.status_code))
+        big = "data:image/jpeg;base64," + "A" * 200000
+        r = await c.post("/v1/chat/completions", headers=U, json={"model": "qwen3-vl-plus", "max_tokens": 50, "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "看图"},
+                                         {"type": "image_url", "image_url": {"url": big}}]}]})
+        rj = r.json()
+        check("视觉消息：图片按 token 估价（不把 base64 当文字）", r.status_code == 200
+              and rj["billing"]["quoted_rmb"] < 0.01, json.dumps(rj.get("billing"))[:200])
 
         print("\n[H] 配置一致性")
         from app.config import candidates

@@ -372,7 +372,11 @@ def mock_storyboard(scenes: list[dict], style: str, char_names: list[str], dur_m
             body = re.sub(r"^[△▲\-\s]+", "", ln)
             sfx = re.findall(r"[<＜]([^>＞]{1,20})[>＞]", body)
             sm = SPEAKER_RE.match(body)
-            if sm and sm.group(1) not in NOT_NAMES:
+            if sm and sm.group(1) in ("旁白", "画外音", "OS", "VO"):   # 旁白进台词（配音用），不进人物
+                words = body[sm.end():].strip()
+                cur["lines"].append(f"旁白：{words}")
+                seg, sec = f"（旁白：“{words}”）", _segment_seconds(words, True)
+            elif sm and sm.group(1) not in NOT_NAMES:
                 who, how = sm.group(1), (sm.group(2) or "").strip()
                 words = body[sm.end():].strip()
                 seg = f"{who}{'（' + how + '）' if how else ''}说：“{words}”"

@@ -25,7 +25,7 @@ def rmb_to_points(rmb: float) -> float:
 # ---------------- 报价 ----------------
 
 def quote(model_id: str, *, spec: str | None = None, seconds: float | None = None,
-          images: int = 1, in_tokens: int = 0, out_tokens: int = 0,
+          images: int = 1, in_tokens: int = 0, out_tokens: int = 0, chars: int = 0,
           route: Route | None = None, basis: str = "price") -> dict:
     """basis=price 算零售价（收用户多少），basis=cost 算上游成本（我们花多少）。"""
     m = models()[model_id]
@@ -34,6 +34,8 @@ def quote(model_id: str, *, spec: str | None = None, seconds: float | None = Non
         rmb = (in_tokens / 1e6) * price["input_rmb_per_m"] + (out_tokens / 1e6) * price["output_rmb_per_m"]
     elif m.unit == "image":
         rmb = price["rmb_per_image"] * max(1, images)
+    elif m.unit == "char":   # 语音合成按字符
+        rmb = price["rmb_per_10k_chars"] * max(1, chars) / 10000
     else:  # output_second / input_second
         rate = price["rmb_per_second"][spec]
         rmb = rate * (seconds or 0)

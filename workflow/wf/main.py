@@ -530,6 +530,43 @@ async def assemble(pid: str, episode_no: int | None = None, allow_partial: bool 
     return await wf().assemble(pid, episode_no, allow_partial)
 
 
+# ---------------- 质检 / 配音 ----------------
+
+@app.post("/projects/{pid}/qc")
+async def qc_project(pid: str, body: dict = Body(default={})):
+    return await wf().qc_project(pid, body.get("episode_no"), body.get("shot_ids"), bool(body.get("force")))
+
+
+@app.post("/jobs/{jid}/qc")
+async def qc_job(jid: str, force: bool = True):
+    return await wf().qc_job(jid, force=force)
+
+
+@app.get("/api/voices")
+async def voices(project: str | None = None):
+    return wf().voices(project)
+
+
+@app.post("/assets/{aid}/voice")
+async def set_voice(aid: str, body: dict = Body(...)):
+    return wf().set_voice(aid, body.get("voice", ""))
+
+
+@app.post("/projects/{pid}/voice-sample")
+async def voice_sample(pid: str, body: dict = Body(...)):
+    return await wf().voice_sample(pid, body.get("voice", ""), body.get("text", ""))
+
+
+@app.post("/projects/{pid}/dub")
+async def dub(pid: str, body: dict = Body(default={})):
+    return await wf().dub_shots(pid, body.get("shot_ids"), body.get("episode_no"), bool(body.get("force")))
+
+
+@app.delete("/projects/{pid}/dub")
+async def clear_dub(pid: str, shot_id: str | None = None):
+    return wf().clear_dub(pid, [shot_id] if shot_id else None)
+
+
 # ---------------- AI 对话 ----------------
 
 @app.get("/chat/agents")

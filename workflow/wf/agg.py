@@ -102,6 +102,10 @@ class Agg:
             body["image"] = refs
         return await self._post("/v1/images/generations", "image", body, idem)
 
+    async def tts(self, model: str, text: str, voice: str, idem: str | None = None) -> dict:
+        return await self._post("/v1/audio/speech", "tts",
+                                {"model": model, "input": text, "voice": voice, "language_type": "Chinese"}, idem)
+
     async def submit_video(self, model: str, prompt: str, resolution: str, duration_s: float,
                            aspect_ratio: str = "9:16", images: list[dict] | None = None,
                            idem: str | None = None, video: str | None = None, project: str | None = None) -> dict:
