@@ -28,8 +28,10 @@ class Provider:
 
     @property
     def live(self) -> bool:
-        """没有 key 就走 mock，保证本地可运行、可测。"""
-        return bool(self.api_key) and self.kind != "mock"
+        """没有 key 就走 mock，保证本地可运行、可测。AGG_FORCE_MOCK=1 时一律 mock（测试用，绝不花钱）。"""
+        if os.environ.get("AGG_FORCE_MOCK", "").strip().lower() in ("1", "true", "yes", "on"):
+            return False
+        return bool(self.api_key) and self.kind != "mock" and self.enabled
 
 
 @dataclass

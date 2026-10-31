@@ -159,37 +159,79 @@ async def image(provider: Provider, api_id: str, payload: dict) -> dict:
         n = int(payload.get("n", 1))
         return {"images": [f"https://mock.local/{provider.id}/{uuid.uuid4().hex[:8]}.png" for _ in range(n)],
                 "provider_model": api_id, "usage": {"images": n}}
-    body = {"model": api_id, **{k: v for k, v in payload.items() if k != "model"}}
+    body = {"model": api_id, "prompt": payload.get("prompt", ""), "n": int(payload.get("n", 1)),
+            "size": payload.get("size") or "1024x1024", "response_format": "url"}
+    refs = [u for u in (payload.get("image") or []) if u]
+    if provider.kind == "ark":
+        body.pop("n", None)
+        body["watermark"] = False
+        if refs:
+            body["image"] = refs if len(refs) > 1 else refs[0]
+    elif refs:
+        body["image"] = refs
     data = await _post(provider, "/images/generations", body)
-    images = [d.get("url") or d.get("b64_json") for d in data.get("data", [])]
+    images = []
+    for d in data.get("data", []):
+        if d.get("url"):
+            images.append(d["url"])
+        elif d.get("b64_json"):
+            images.append("data:image/png;base64," + d["b64_json"])
+    if not images:
+        raise ProviderError(provider.id, None, f"no image in response: {str(data)[:200]}")
     return {"images": images, "provider_model": data.get("model", api_id),
             "usage": {"images": len(images)}}
 
 
 # ---------------- video ----------------
 
+VIDEO_IMAGE_ROLES = ("first_frame", "last_frame", "reference_image")
+
+
+def normalize_images(raw) -> list[dict]:
+    """参考图统一成 [{"url", "role"}]；字符串默认当 reference_image。"""
+    out = []
+    for item in raw or []:
+        if isinstance(item, str):
+            item = {"url": item}
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        role = item.get("role") if item.get("role") in VIDEO_IMAGE_ROLES else "reference_image"
+        out.append({"url": str(item["url"]), "role": role})
+    return out[:9]
+
+
 async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict) -> dict:
     if _mock_disabled(provider):
         raise ProviderError(provider.id, 502, "mock injected failure")
+    images = normalize_images(payload.get("images"))
     if not provider.live:
         await asyncio.sleep(0.01)
-        return {"provider_task_id": f"mock-{uuid.uuid4().hex[:12]}", "state": "submitted"}
+        # 把时长编进假任务号，轮询时按请求时长"出片"，便于下游测拼接
+        dur = int(round(float(payload.get("duration", 5))))
+        return {"provider_task_id": f"mock-{dur}-{uuid.uuid4().hex[:12]}", "state": "submitted"}
     if provider.kind == "ark":
+        content: list[dict] = [{"type": "text", "text": payload.get("prompt", "")}]
+        for img in images:
+            content.append({"type": "image_url", "image_url": {"url": img["url"]}, "role": img["role"]})
         body = {
             "model": api_id,
-            "content": [{"type": "text", "text": payload.get("prompt", "")}],
-            "duration": int(payload.get("duration", 5)),
+            "content": content,
+            "duration": int(round(float(payload.get("duration", 5)))),
             "resolution": spec.lower(),
             "ratio": payload.get("aspect_ratio", "16:9"),
-            "generate_audio": bool(payload.get("generate_audio", True)),
             "watermark": False,
         }
+        if "generate_audio" in payload:
+            body["generate_audio"] = bool(payload["generate_audio"])
         data = await _post(provider, "/contents/generations/tasks", body)
     else:
         body = {"model": api_id, "prompt": payload.get("prompt", ""),
-                "duration": int(payload.get("duration", 5)), "quality": spec.lower(),
+                "duration": int(round(float(payload.get("duration", 5)))), "quality": spec.lower(),
                 "aspect_ratio": payload.get("aspect_ratio", "16:9"),
                 "generate_audio": bool(payload.get("generate_audio", True))}
+        if images:
+            body["images"] = [i["url"] for i in images]
+            body["image"] = images[0]["url"]
         data = await _post(provider, "/videos/generations", body)
     task_id = data.get("id") or data.get("task_id")
     if not task_id:
@@ -200,8 +242,12 @@ async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict
 async def poll_video(provider: Provider, provider_task_id: str) -> dict:
     if not provider.live:
         await asyncio.sleep(0.01)
+        try:
+            seconds = float(os.environ.get("MOCK_VIDEO_SECONDS") or provider_task_id.split("-")[1])
+        except (IndexError, ValueError):
+            seconds = 5.0
         return {"state": "succeeded", "url": f"https://mock.local/{provider_task_id}.mp4",
-                "seconds": 5, "usage": {"output_seconds": 5}}
+                "seconds": seconds, "usage": {"output_seconds": seconds}}
     if provider.kind == "ark":
         data = await _get(provider, f"/contents/generations/tasks/{provider_task_id}")
         state = data.get("status")

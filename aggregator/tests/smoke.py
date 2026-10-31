@@ -7,6 +7,7 @@ import sys
 import httpx
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ["AGG_FORCE_MOCK"] = "1"
 os.environ.setdefault("AGG_DB", os.path.join(os.path.dirname(__file__), "..", "data", "smoke.db"))
 if os.path.exists(os.environ["AGG_DB"]):
     os.remove(os.environ["AGG_DB"])

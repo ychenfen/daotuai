@@ -24,6 +24,7 @@ import logging  # noqa: E402
 logging.getLogger("httpx").setLevel(logging.WARNING)
 DB = os.path.join(ROOT, "data", "test.db")
 os.environ["AGG_DB"] = DB
+os.environ["AGG_FORCE_MOCK"] = "1"  # 测试绝不走真实渠道（电脑上有真实 key）
 for f in (DB, DB + "-wal", DB + "-shm"):
     if os.path.exists(f):
         os.remove(f)
@@ -54,9 +55,10 @@ async def main() -> int:
     async with httpx.AsyncClient(transport=transport, base_url="http://agg") as c:
         print("\n[A] 模型目录与定价")
         h = (await c.get("/healthz")).json()
-        check("healthz ok", h.get("ok") is True and h["providers"] == 19 and h["models"] == 9, str(h))
+        check("healthz ok", h.get("ok") is True and h["providers"] == 21 and h["models"] == 15, str(h))
         ms = (await c.get("/v1/models")).json()["data"]
-        check("模型目录 9 个", len(ms) == 9, str(len(ms)))
+        check("模型目录 15 个", len(ms) == 15, str(len(ms)))
+        check("强制 mock 时没有真实线路", not any(m["live"] for m in ms), str([m["id"] for m in ms if m["live"]]))
 
         q = (await c.post("/v1/quote", json={"model": "gpt-6.1-sol", "in_tokens": 1_000_000,
                                              "out_tokens": 1_000_000})).json()
@@ -108,7 +110,9 @@ async def main() -> int:
                                 "duration": 4})).json()
         check("提交返回 submitted", v["status"] == "submitted" and v["id"].startswith("vtask_"), str(v)[:160])
         check("预扣 = 4s×0.8 = 3.2", near(v["billing"]["quoted_rmb"], 3.2), str(v["billing"]))
+        os.environ["MOCK_VIDEO_SECONDS"] = "5"  # 模拟上游实际出了 5s（比请求的 4s 多）
         done = (await c.get(f"/v1/videos/{v['id']}/wait?timeout_s=5", headers=U)).json()
+        os.environ.pop("MOCK_VIDEO_SECONDS", None)
         check("轮询完成并结算", done["status"] == "succeeded", str(done)[:200])
         check("按上游返回 5s 结算 = 4.0（补扣）", near(done["billing"]["charged_rmb"], 4.0),
               str(done["billing"]))

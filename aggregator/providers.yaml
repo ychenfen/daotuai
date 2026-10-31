@@ -1,6 +1,25 @@
 # 上游渠道（对应刀徒 /api/system/status 里的 api_services）
-# kind: openai = OpenAI 兼容 /v1/chat/completions；ark = 火山方舟视频任务；mock = 无 key 时的本地假实现
+# kind: openai = OpenAI 兼容 /v1/chat/completions；ark = 火山方舟（文本/图像 OpenAI 兼容，视频走任务接口）
+# 没有 key 的渠道自动走 mock；设 AGG_FORCE_MOCK=1 时全部走 mock。
 providers:
+  # ---------- 真实可用：纪总电脑上已配好 key 的三家 ----------
+  - id: deepseek
+    label: DeepSeek 官方
+    kind: openai
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    concurrency: 8
+    timeout_s: 180
+  - id: dashscope
+    label: 阿里百炼（OpenAI 兼容）
+    kind: openai
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    concurrency: 8
+    timeout_s: 180
+  # 火山方舟 volcengine_official 见下方
+
+  # ---------- 刀徒同款渠道（多数 base_url 为占位，填 key 前先核对地址） ----------
   - id: dmxapi
     label: DM API
     kind: openai

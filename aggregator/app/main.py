@@ -110,12 +110,16 @@ def healthz():
 @app.get("/v1/models")
 def list_models():
     data = []
+    plist = providers()
     for m in models().values():
+        routes = [{"provider": r.provider, "api_id": r.api_id, "spec": r.spec,
+                   "group": r.group, "weight": r.weight,
+                   "live": bool(r.provider in plist and plist[r.provider].live)} for r in m.routes]
         data.append({
             "id": m.id, "type": m.type, "unit": m.unit, "price": m.price,
             "specs": m.specs, "modes": m.modes, "duration": m.duration,
-            "routes": [{"provider": r.provider, "api_id": r.api_id, "spec": r.spec,
-                        "group": r.group, "weight": r.weight} for r in m.routes],
+            "live": any(r["live"] for r in routes),
+            "routes": routes,
         })
     return {"object": "list", "data": data}
 
@@ -285,6 +289,12 @@ async def chat_completions(request: Request, x_user_id: str | None = Header(defa
 
 # ---------------- 图像 ----------------
 
+def _as_list(v) -> list[str]:
+    if not v:
+        return []
+    return [str(x) for x in (v if isinstance(v, list) else [v]) if x]
+
+
 @app.post("/v1/images/generations")
 async def image_generations(request: Request, x_user_id: str | None = Header(default=None),
                             idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
@@ -310,7 +320,8 @@ async def image_generations(request: Request, x_user_id: str | None = Header(def
         route, result, meta = await router.call(
             model_id, None, lambda r: prov.image(providers()[r.provider], r.api_id,
                                                  {"model": r.api_id, "prompt": body.get("prompt", ""),
-                                                  "n": n, "size": body.get("size", "1024x1024")}))
+                                                  "n": n, "size": body.get("size", "1024x1024"),
+                                                  "image": _as_list(body.get("image"))}))
     except router.RouterExhausted as e:
         billing.refund(hold, "image failed")
         return bad(str(e), 502, code="upstream_failed", attempts=e.attempts)
