@@ -10,6 +10,18 @@
 | 密钥 | `/opt/daotuai/.env`（600 权限），从纪总电脑的环境变量直接写过去，不进 git |
 | 访问密码 | 第一次部署时随机生成，写在服务器 `/opt/daotuai/ACCESS.txt` |
 
+## 挂在已有站点的子路径下（当前用法）
+
+现在挂在 `https://stock.yuchenxu.cn/studio/`，不用新加域名解析，用量化站已有的证书：
+
+```bash
+bash deploy/push_from_windows.sh stock.yuchenxu.cn --path /studio
+```
+
+nginx 只做两件事：写 `/etc/nginx/snippets/daotuai-studio.conf`，并在 `stock.yuchenxu.cn` 的 443 server 块里加一行
+`include`（改前备份到 `/opt/daotuai/data/nginx-backup-*`，`nginx -t` 不过自动恢复）。前端按页面地址自动识别前缀，
+本机直接开 `/ui/` 照常可用。
+
 ## 第一次部署 / 更新代码
 
 在纪总电脑上（Git Bash，`daotuai` 目录下）：

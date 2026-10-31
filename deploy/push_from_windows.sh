@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # 在纪总的 Windows 电脑上（Git Bash）把工作台推到 Linux 服务器并安装。
-#   bash deploy/push_from_windows.sh <域名> [--with-data] [--force-data]
+#   bash deploy/push_from_windows.sh <域名> [--path /studio] [--with-data] [--force-data]
 #   --with-data   把电脑上的数据库和 media 一起搬过去（服务器上已有数据时拒绝，除非加 --force-data）
 # 密钥：从本机环境变量读 providers.yaml 里声明的 *_API_KEY，经 SSH 直接写进服务器 /opt/daotuai/.env（600 权限）；
 #       不打印、不进 git、不进日志。
 set -euo pipefail
 DOMAIN="${1:?用法: push_from_windows.sh <域名> [--with-data] [--force-data]}"; shift
-WITH_DATA=0; FORCE=0
-for x in "$@"; do case "$x" in --with-data) WITH_DATA=1;; --force-data) FORCE=1;; esac; done
+WITH_DATA=0; FORCE=0; SUBPATH_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --with-data) WITH_DATA=1; shift;; --force-data) FORCE=1; shift;;
+    --path) SUBPATH_ARG="--path ${2:?}"; shift 2;;   # 挂到已有站点的子路径，例 --path /studio
+    *) shift;;
+  esac
+done
 HOST="${DAOTUAI_SERVER:-ubuntu@43.137.12.89}"
 KEY="${DAOTUAI_SSH_KEY:-$USERPROFILE/.ssh/tmp_key}"
 S=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new
@@ -81,4 +87,4 @@ PYEOF
 fi
 
 echo "== 服务器安装"
-sx "bash /opt/daotuai/deploy/linux/install.sh '$DOMAIN' $MIG"
+sx "bash /opt/daotuai/deploy/linux/install.sh '$DOMAIN' $SUBPATH_ARG $MIG"

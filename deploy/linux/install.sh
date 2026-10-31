@@ -3,9 +3,15 @@
 #   bash /opt/daotuai/deploy/linux/install.sh <域名> [--migrate-from '<旧机器项目根目录>']
 # 幂等：可以反复跑。不会动服务器上其他站点；nginx 配置检查不过就撤掉本站点配置。
 set -euo pipefail
-DOMAIN="${1:?用法: install.sh <域名> [--migrate-from 旧根目录]}"; shift
-OLD_ROOT=""
-[ "${1:-}" = "--migrate-from" ] && OLD_ROOT="${2:-}"
+DOMAIN="${1:?用法: install.sh <域名> [--path /studio] [--migrate-from 旧根目录|auto]}"; shift
+OLD_ROOT=""; SUBPATH=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --migrate-from) OLD_ROOT="${2:-}"; shift 2;;
+    --path) SUBPATH="/${2#/}"; SUBPATH="${SUBPATH%/}"; shift 2;;
+    *) shift;;
+  esac
+done
 R=/opt/daotuai
 cd "$R"
 mkdir -p data/logs workflow/data aggregator/data media
@@ -50,6 +56,31 @@ for p in 8010 8011; do
   for i in $(seq 1 40); do curl -fs "http://127.0.0.1:$p/healthz" >/dev/null && break; sleep 0.5; done
   curl -fs "http://127.0.0.1:$p/healthz" >/dev/null && echo "  127.0.0.1:$p ok" || { echo "  127.0.0.1:$p 没起来"; tail -20 data/logs/*.log; exit 1; }
 done
+
+if [ -n "$SUBPATH" ]; then
+  echo "== 6/6 nginx：挂到 https://$DOMAIN$SUBPATH/（用该站点已有证书）"
+  [ -f /etc/nginx/daotuai.htpasswd ] || { echo "  还没有访问账号（/etc/nginx/daotuai.htpasswd），先设置再挂出去"; exit 1; }
+  SITE=$(sudo grep -lE "server_name[^;]*\b$DOMAIN\b" /etc/nginx/sites-enabled/* | head -1)
+  [ -n "$SITE" ] || { echo "  没找到 $DOMAIN 的站点配置"; exit 1; }
+  BK="$R/data/nginx-backup-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$BK"
+  sudo cp -a "$SITE" "$BK/"; [ -f /etc/nginx/snippets/daotuai-studio.conf ] && sudo cp -a /etc/nginx/snippets/daotuai-studio.conf "$BK/" || true
+  echo "  站点文件 $SITE，已备份到 $BK"
+  sudo mkdir -p /etc/nginx/snippets
+  sed "s#__PATH__#$SUBPATH#g" deploy/linux/nginx-daotuai-path.conf | sudo tee /etc/nginx/snippets/daotuai-studio.conf >/dev/null
+  sudo python3 deploy/linux/nginx_include.py "$SITE" "$DOMAIN" /etc/nginx/snippets/daotuai-studio.conf
+  if ! sudo nginx -t -q; then
+    sudo cp -a "$BK/$(basename "$SITE")" "$SITE"; sudo rm -f /etc/nginx/snippets/daotuai-studio.conf
+    [ -f "$BK/daotuai-studio.conf" ] && sudo cp -a "$BK/daotuai-studio.conf" /etc/nginx/snippets/ || true
+    sudo nginx -t -q && echo "  nginx 配置检查不过，已原样恢复" ; exit 1
+  fi
+  sudo systemctl reload nginx
+  sleep 1
+  for u in "$SUBPATH" "$SUBPATH/ui/" "$SUBPATH/healthz" "/"; do
+    printf '  https://%s%s 不带密码 → %s\n' "$DOMAIN" "$u" "$(curl -s -o /dev/null -w '%{http_code}' "https://$DOMAIN$u")"
+  done
+  echo "完成：https://$DOMAIN$SUBPATH/"
+  exit 0
+fi
 
 echo "== 6/6 nginx + HTTPS：$DOMAIN"
 MYIP=$(curl -fs --max-time 5 http://metadata.tencentyun.com/latest/meta-data/public-ipv4 || curl -fs --max-time 5 https://ifconfig.me || true)

@@ -36,12 +36,22 @@ function badge(st) {
 }
 const isLive = id => !!(S.models.find(m => m.id === id) || {}).live;
 const model = id => S.models.find(m => m.id === id) || {};
+// 挂在子路径下（例：https://stock.yuchenxu.cn/studio/ui/）时，接口、下载链接和 /media 素材都要带上前缀；
+// 本机直接开 /ui/ 时 BASE 为空，行为不变。
+const BASE = location.pathname.replace(/\/ui(\/.*)?$/, '').replace(/\/+$/, '');
+function withBase(x) {
+  if (!BASE) return x;
+  if (typeof x === 'string') return x.startsWith('/media/') ? BASE + x : x;
+  if (Array.isArray(x)) return x.map(withBase);
+  if (x && typeof x === 'object') { for (const k in x) x[k] = withBase(x[k]); }
+  return x;
+}
 async function api(method, path, body, raw) {
   const opt = {method, headers: {}};
   if (raw) opt.body = raw;
   else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
-  const r = await fetch(path, opt);
-  let data = null; try { data = await r.json(); } catch (e) { /* 非 JSON */ }
+  const r = await fetch(BASE + path, opt);
+  let data = null; try { data = withBase(await r.json()); } catch (e) { /* 非 JSON */ }
   if (!r.ok) {
     const err = new Error((data && data.error && data.error.message) || (data && data.detail) || ('HTTP ' + r.status));
     err.status = r.status; err.data = data; throw err;
@@ -177,7 +187,7 @@ function projCard(p) {
     <div class="row" style="margin-top:8px"><button class="small" onclick="go('script','${p.id}')">打开</button>
       <button class="small" onclick="setCover('${p.id}')">封面</button>
       <button class="small" onclick="act(null,()=>api('POST','/projects/${p.id}/pin?pinned=${!p.pinned}'))">${p.pinned ? '取消置顶' : '置顶'}</button>
-      <a class="small" href="/projects/${p.id}/export">下载</a><span class="spacer"></span>
+      <a class="small" href="${BASE}/projects/${p.id}/export">下载</a><span class="spacer"></span>
       <button class="small danger" onclick="delProject('${p.id}','${esc(p.name)}')">删除</button></div></div></div>`;
 }
 async function createProject(btn) {
@@ -343,7 +353,7 @@ function pgAssets() {
       .map(([k, v, n]) => `<span class="tab ${S.assetKind === k ? 'on' : ''}" onclick="S.assetKind='${k}';render()">${v} ${n}</span>`).join('')}</div>
       <span class="spacer"></span><input style="width:160px" placeholder="搜索资产" value="${esc(S.assetQ)}" oninput="S.assetQ=this.value;clearTimeout(S.qt);S.qt=setTimeout(render,250)">
       <button class="primary" onclick="addAssetModal()">＋ 新增资产</button><button onclick="batchImages(this)">批量生图</button>
-      <a href="/projects/${S.pid}/download?what=assets"><button>批量下载</button></a><button onclick="bulkUpload(this)">批量上传</button>
+      <a href="${BASE}/projects/${S.pid}/download?what=assets"><button>批量下载</button></a><button onclick="bulkUpload(this)">批量上传</button>
       <button onclick="settingsModal()">生成设置</button></div></div>
   ${list.length ? `<div class="grid">${list.map(assetCard).join('')}</div>` : '<div class="empty">还没有资产。去剧本页点“AI 智能解析 / 本地抽取资产”，或手动新增。</div>'}`;
 }
@@ -645,8 +655,8 @@ function pgVideos() {
     <button onclick="addShot(this)">新增卡片</button><button onclick="playAll()" ${doneN ? '' : 'disabled'}>播放全部</button>
     <button onclick="shots_select(true)">全选本集</button><button onclick="shots_select(false)">清除选择</button>
     <button class="primary" onclick="batchGen(this)">批量生成${S.sel.size ? `（${S.sel.size}）` : '（未出片的）'}</button>
-    <a href="/projects/${S.pid}/download?what=videos&episode_no=${e.no}"><button ${doneN ? '' : 'disabled'}>批量下载</button></a>
-    <a href="/projects/${S.pid}/edit-package?episode_no=${e.no}"><button ${doneN ? '' : 'disabled'} title="编号片段 + 字幕 + EDL/FCPXML，Premiere/达芬奇/剪映可用">导出剪辑工程</button></a>
+    <a href="${BASE}/projects/${S.pid}/download?what=videos&episode_no=${e.no}"><button ${doneN ? '' : 'disabled'}>批量下载</button></a>
+    <a href="${BASE}/projects/${S.pid}/edit-package?episode_no=${e.no}"><button ${doneN ? '' : 'disabled'} title="编号片段 + 字幕 + EDL/FCPXML，Premiere/达芬奇/剪映可用">导出剪辑工程</button></a>
     <button onclick="qcEpisode(this,${e.no})" ${doneN ? '' : 'disabled'} title="技术检查 + 视觉模型核对人物一致性/画面/字幕水印">质检本集</button>
     <button onclick="dubEpisode(this,${e.no})" title="按台词用角色音色合成配音轨">配音本集</button>
     <button onclick="act(this,()=>api('POST','/projects/${S.pid}/videos/poll'),'已刷新回执')">刷新回执</button></div>
@@ -849,8 +859,8 @@ function pgFinal() {
     <label class="small"><input type="checkbox" ${st.burn_subtitles ? 'checked' : ''} onchange="act(null,()=>api('PATCH','/projects/${S.pid}/settings',{burn_subtitles:this.checked}),'已保存')"> 字幕烧进画面</label>
     <button class="primary" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble'),'已合成')">合成全部剧集</button>
     <button onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?allow_partial=true'),'已合成（跳过缺的镜头）')">跳过缺镜头合成</button>
-    <a href="/projects/${S.pid}/download?what=finals"><button>下载全部成片</button></a>
-    <a href="/projects/${S.pid}/edit-package"><button title="编号片段 + 字幕 + EDL/FCPXML">导出剪辑工程</button></a>
+    <a href="${BASE}/projects/${S.pid}/download?what=finals"><button>下载全部成片</button></a>
+    <a href="${BASE}/projects/${S.pid}/edit-package"><button title="编号片段 + 字幕 + EDL/FCPXML">导出剪辑工程</button></a>
     <button onclick="genCovers(this,null)">生成全部封面</button></div>
     <div class="row" style="margin-top:8px"><label class="small">配音<select onchange="act(null,()=>api('PATCH','/projects/${S.pid}/settings',{dub_mode:this.value}),'已保存')">${Object.entries(DUB).map(([k, v]) => `<option value="${k}" ${st.dub_mode === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
       <span class="small muted">${st.dub_mode === 'off' ? '用视频模型自带的台词声音' : `合成时自动给缺配音的镜头补配音（旁白：${esc(voiceName(st.narrator_voice))}）`}</span>
