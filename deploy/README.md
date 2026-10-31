@@ -19,6 +19,11 @@ bash deploy/push_from_windows.sh studio.yuchenxu.cn --with-data   # 第一次：
 bash deploy/push_from_windows.sh studio.yuchenxu.cn               # 以后：只更新代码和密钥
 ```
 
+指定访问账号（只传哈希，不传明文）：先 `openssl passwd -apr1 <密码>` 得到哈希，再
+`DAOTUAI_HTPASSWD='用户名:$apr1$...' bash deploy/push_from_windows.sh ...`。不指定时第一次部署随机生成。
+
+服务器在短时间多次 SSH 连接时会直接断开，脚本每次 SSH 都带退避重试（最多 6 次）。
+
 脚本会：推代码 → 写 `.env` → （可选）数据库快照 + `media` → 服务器上 `deploy/linux/install.sh`：
 装 `python3-venv`/`ffmpeg` → 建 venv → **跑全部测试（没全过就停）** → 数据库里的 Windows 路径改成 `/opt/daotuai/...`
 → 重启服务 → 域名解析到本机时配 nginx 和证书。
