@@ -12,7 +12,7 @@ const STATUS = {draft: '草稿', script_ready: '剧本就绪', parsed: '已解�
   prompts_done: '提示词完成', videos_running: '出片中', videos_done: '视频完成', final_ready: '成片完成',
   storyboard_ready: '待提示词', prompt_ready: '待出片', video_submitted: '生成中', video_done: '已出片', video_failed: '失败',
   submitted: '已提交', running: '生成中', succeeded: '成功', failed: '失败', cancelled: '已取消', queued: '排队'};
-const MODE = {auto: '自动', reference: '全能参考', first_frame: '首帧参考', text: '文生视频'};
+const MODE = {auto: '自动', reference: '全能参考', first_frame: '首帧参考', chain: '接上一镜尾帧', text: '文生视频'};
 const JOB_MODE = {...MODE, video_edit: '视频编辑', motion_transfer: '动作迁移'};
 const TOOLS = [['shot', '分镜视频'], ['video_edit', '视频编辑 · Omni Flash'], ['motion_transfer', '动作迁移 · Wan 2.2']];
 
@@ -237,6 +237,9 @@ function settingsModal() {
     <span>每集最多卡片</span><input data-k="max_shots" type="number" min="1" max="80" value="${st.max_shots}">
     <span>提示词格式</span>${sel('prompt_format', [['text', '文本（刀徒格式）'], ['json', 'JSON 结构']])}
     <span>项目预算（元）</span><input data-k="budget_rmb" type="number" min="0" step="1" value="${st.budget_rmb}">
+    <span>成片配乐</span><select data-k="bgm_material_id"><option value="">不加配乐</option>${S.p.materials.filter(m => m.media_type === 'audio').map(m => `<option value="${m.id}" ${m.id === st.bgm_material_id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+    <span>配乐音量（0~1）</span><input data-k="bgm_volume" type="number" min="0" max="1" step="0.05" value="${st.bgm_volume}">
+    <span>视频超时（分钟）</span><input data-k="job_timeout_min" type="number" min="5" max="600" step="5" value="${st.job_timeout_min}">
     ${tog('gen_asset_images', '一键时资产出图')}${tog('gen_blocking', '一键时生成站位图')}${tog('use_blocking_ref', '站位图作为出片参考')}
     ${tog('gen_frames', '一键时生成分镜图')}${tog('auto_assemble', '一键最后自动合成')}${tog('burn_subtitles', '字幕烧进画面')}
   </div><div class="row" style="margin-top:12px"><span class="muted small">“真实”模型会真实调用并扣费；“模拟”零成本，用来走通流程。超出项目预算的视频不会提交。</span>
@@ -773,12 +776,21 @@ function pgFinal() {
     <button class="primary" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble'),'已合成')">合成全部剧集</button>
     <button onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?allow_partial=true'),'已合成（跳过缺的镜头）')">跳过缺镜头合成</button>
     <a href="/projects/${S.pid}/download?what=finals"><button>下载全部成片</button></a>
-    <a href="/projects/${S.pid}/edit-package"><button title="编号片段 + 字幕 + EDL/FCPXML">导出剪辑工程</button></a></div></div>
+    <a href="/projects/${S.pid}/edit-package"><button title="编号片段 + 字幕 + EDL/FCPXML">导出剪辑工程</button></a>
+    <button onclick="genCovers(this,null)">生成全部封面</button></div>
+    <div class="small muted" style="margin-top:6px">配乐：${st.bgm_material_id ? '已选 ' + esc((S.p.materials.find(m => m.id === st.bgm_material_id) || {}).name || '') + `，音量 ${st.bgm_volume}` : '未设置（在“生成设置”里选一段上传的音频）'}</div></div>
   <div class="grid">${S.p.episodes.map(e => `<div class="card"><div class="row"><b>${esc(e.title)}</b>${e.final_url ? `<span class="badge ok">${e.final_seconds.toFixed(1)} 秒</span>` : '<span class="badge">未合成</span>'}
     <span class="spacer"></span><span class="small muted">${e.videos_done}/${e.shots} 镜头已出片</span></div>
+    ${e.cover_url ? `<img src="${esc(e.cover_url)}" class="thumb tall" style="margin-top:8px;max-width:180px">` : ''}
     ${e.final_url ? `<video controls src="${esc(e.final_url)}" style="margin-top:8px"></video><div class="row" style="margin-top:6px"><a href="${esc(e.final_url)}" download>下载视频</a><a href="${esc(e.srt_url)}" download>下载字幕</a></div>` : ''}
     <div class="row" style="margin-top:8px"><button class="small" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?episode_no=${e.no}'),'已合成')">合成本集</button>
-      <button class="small" onclick="S.ep=${e.no};go('videos')">去视频页</button></div></div>`).join('') || '<div class="empty">还没分集</div>'}</div>`;
+      <button class="small" onclick="S.ep=${e.no};go('videos')">去视频页</button>
+      <button class="small" onclick="genCovers(this,${e.no})">${e.cover_url ? '重做封面' : '生成封面'}</button></div></div>`).join('') || '<div class="empty">还没分集</div>'}</div>`;
+}
+
+async function genCovers(btn, epNo) {
+  if (!confirmCost([S.p.settings.image_model], '生成封面')) return;
+  await act(btn, () => api('POST', `/projects/${S.pid}/covers${epNo ? '?episode_no=' + epNo : ''}`), r => `封面 ${r.generated.length} 张${r.failed.length ? '，失败 ' + r.failed.length : ''}`);
 }
 
 // ---------------- 对话 ----------------

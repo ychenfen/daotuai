@@ -564,6 +564,53 @@ async def main() -> int:
             wfdb.DB_PATH = saved
         check("旧库启动时自动补列、数据不丢", "text_charged_rmb" in cols and kept and kept[0] == "旧项目", str(cols))
 
+        print("\n[X] 成熟度：配乐 / 分集封面 / 接上一镜尾帧 / 卡死任务超时退款 / 数据库备份")
+        if HAS_FFMPEG:
+            import subprocess  # noqa: E402
+            bgm_file = os.path.join(TMP, "bgm.m4a")
+            subprocess.run([media.ffmpeg_bin(), "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                            "sine=frequency=440:duration=3", "-c:a", "aac", bgm_file], check=True)
+            mat = await j(await c.post(f"/projects/{pid}/materials?filename=bgm.m4a&name=配乐", content=open(bgm_file, "rb").read()))
+            await c.patch(f"/projects/{pid}/settings", json={"bgm_material_id": mat["id"], "bgm_volume": 0.3})
+            a = await j(await c.post(f"/projects/{pid}/assemble?episode_no=1&allow_partial=true"))
+            st = await j(await c.get(f"/projects/{pid}"))
+            info = media.probe(st["episodes"][0]["final_path"])
+            exp = sum(s["job"]["seconds"] for s in st["shots"] if s["episode_no"] == 1)
+            check("成片配乐：铺满全片且时长不变、有音轨", info["has_audio"] and abs(info["duration"] - exp) < 1.0,
+                  json.dumps({"info": info, "exp": exp, "a": a}, ensure_ascii=False)[:200])
+            bad = await c.patch(f"/projects/{pid}/settings", json={"bgm_volume": 5})
+            check("配乐音量自动限制在 0~1", (await j(bad))["settings"]["bgm_volume"] == 1.0, "")
+            ch = st["shots"][1]
+            r = await j(await c.post(f"/projects/{pid}/videos", json={"shot_ids": [ch["id"]], "mode": "chain",
+                                                                     "accept_stale": True, "allow_missing": True}))
+            st = await j(await c.get(f"/projects/{pid}"))
+            jb = next(s for s in st["shots"] if s["id"] == ch["id"])["jobs"][-1]
+            check("接上一镜尾帧：首帧来自上一镜成片", r["submitted"] and jb["mode"] == "first_frame"
+                  and jb["refs"][0].get("chain_from") == st["shots"][0]["code"], json.dumps(jb["refs"], ensure_ascii=False))
+        cv = await j(await c.post(f"/projects/{pid}/covers?episode_no=1"))
+        st = await j(await c.get(f"/projects/{pid}"))
+        check("分集封面：生成竖版海报并可访问", cv["generated"] and st["episodes"][0]["cover_url"]
+              and (await c.get(st["episodes"][0]["cover_url"])).status_code == 200, json.dumps(cv)[:200])
+        check("封面花费计入图片", st["spend"]["images_rmb"] > 0, "")
+        # 卡死任务：把一个在跑的任务改成 2 小时前提交，轮询时应取消并退款
+        stuck = await j(await c.post(f"/projects/{pid}/videos", json={"shot_ids": [st["shots"][2]["id"]],
+                                                                     "accept_stale": True, "allow_missing": True}))
+        jid = stuck["submitted"][0]["job"]
+        from wf import db as wfdb2  # noqa: E402
+        with wfdb2.tx() as cc:
+            cc.execute("UPDATE jobs SET created_at='2000-01-01 00:00:00' WHERE id=?", (jid,))
+        p = await j(await c.post(f"/projects/{pid}/videos/poll"))
+        st = await j(await c.get(f"/projects/{pid}"))
+        jj = next(x for s in st["shots"] for x in s["jobs"] if x["id"] == jid)
+        check("卡死任务超时：取消并标失败（写明原因）", jj["status"] == "failed" and "超时" in jj["error"]
+              and any(f.get("timeout") for f in p["failed"]), json.dumps(jj, ensure_ascii=False)[:200])
+        from app.main import app as agg_app2  # noqa: E402
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app2), base_url="http://agg") as ac:
+            w = (await ac.get("/v1/wallet", headers={"X-User-Id": "studio"})).json()
+        check("超时任务的预扣已退回（无未结算预扣）", w["open_holds"]["count"] == 0, json.dumps(w["open_holds"]))
+        bk = wfdb2.backup()
+        check("数据库在线备份", bk and os.path.exists(bk) and os.path.getsize(bk) > 0, bk)
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

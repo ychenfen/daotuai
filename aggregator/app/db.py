@@ -120,6 +120,29 @@ def _migrate(c: sqlite3.Connection) -> None:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
+def backup(keep: int = 10) -> str:
+    """在线备份账本库到 data/backups/，只留最近 keep 份。"""
+    if not os.path.exists(DB_PATH):
+        return ""
+    bdir = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
+    os.makedirs(bdir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(DB_PATH))[0]
+    dst = os.path.join(bdir, f"{stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
+    with _lock:
+        src, out = sqlite3.connect(DB_PATH), sqlite3.connect(dst)
+        try:
+            src.backup(out)
+        finally:
+            out.close()
+            src.close()
+    for f in sorted(x for x in os.listdir(bdir) if x.startswith(stem + "-") and x.endswith(".db"))[:-keep]:
+        try:
+            os.remove(os.path.join(bdir, f))
+        except OSError:
+            pass
+    return dst
+
+
 def init() -> None:
     with tx() as c:
         c.executescript(SCHEMA)

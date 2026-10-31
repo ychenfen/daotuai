@@ -39,9 +39,12 @@ DEFAULT_SETTINGS = {
     "gen_frames": False,
     "auto_assemble": True,
     "burn_subtitles": False,
+    "bgm_material_id": "",           # 成片配乐：本地素材里的音频
+    "bgm_volume": 0.25,              # 配乐音量（0~1，压在镜头原声下面）
+    "job_timeout_min": 45,           # 视频超过这么久没结果就取消并退回预扣
 }
 SETTING_TYPES = {k: type(v) for k, v in DEFAULT_SETTINGS.items()}
-CHOICES = {"video_mode": ("auto", "text", "first_frame", "reference"), "engine": ("auto", "local"),
+CHOICES = {"video_mode": ("auto", "text", "first_frame", "reference", "chain"), "engine": ("auto", "local"),
            "prompt_format": ("text", "json"), "image_resolution": ("1K", "2K", "4K"),
            "aspect_ratio": ("9:16", "16:9", "1:1", "3:4", "4:3")}
 
@@ -178,6 +181,8 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
         out["max_shots"] = max(1, min(80, out["max_shots"]))
         out["shot_seconds"] = max(2, min(30, out["shot_seconds"]))
         out["budget_rmb"] = max(0.0, out["budget_rmb"])
+        out["bgm_volume"] = max(0.0, min(1.0, out["bgm_volume"]))
+        out["job_timeout_min"] = max(5, min(600, out["job_timeout_min"]))
         return out
 
     def _project_row(self, pid: str):
@@ -239,6 +244,7 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
                 or (s["jobs"][-1] if s["jobs"] else None)
         kinds = {"character": "characters", "scene": "scenes", "prop": "props", "creature": "creatures"}
         for e in eps:
+            e["cover_url"] = media.url_of(e.get("cover_path") or "")
             e["final_url"] = media.url_of(e["final_path"])
             e["srt_url"] = media.url_of(e["srt_path"])
             e["scenes"] = sum(1 for s in scenes if s["episode_id"] == e["id"])
@@ -274,8 +280,10 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
             blocks = c.execute("SELECT COALESCE(SUM(blocking_charged_rmb),0) v FROM scenes WHERE project_id=?",
                                (pid,)).fetchone()["v"]
             text = c.execute("SELECT text_charged_rmb v FROM projects WHERE id=?", (pid,)).fetchone()["v"]
+            covers = c.execute("SELECT COALESCE(SUM(cover_charged_rmb),0) v FROM episodes WHERE project_id=?",
+                               (pid,)).fetchone()["v"]
         budget = float(self.settings(pid)["budget_rmb"])
-        images = float(imgs) + float(frames) + float(blocks)
+        images = float(imgs) + float(frames) + float(blocks) + float(covers)
         total = round(float(jobs) + images + float(text), 4)
         return {"videos_rmb": round(float(jobs), 4), "images_rmb": round(images, 4), "text_rmb": round(float(text), 4),
                 "total_rmb": total, "budget_rmb": budget, "remaining_rmb": round(budget - total, 4)}

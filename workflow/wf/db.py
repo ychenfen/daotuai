@@ -287,7 +287,34 @@ def _is_legacy() -> bool:
 # 增量迁移：已有库缺的列在启动时补上（不丢数据）
 MIGRATIONS = [
     ("projects", "text_charged_rmb", "REAL NOT NULL DEFAULT 0"),
+    ("episodes", "cover_path", "TEXT NOT NULL DEFAULT ''"),
+    ("episodes", "cover_charged_rmb", "REAL NOT NULL DEFAULT 0"),
 ]
+
+
+def backup(keep: int = 10) -> str:
+    """把当前库在线备份到 data/backups/（SQLite 备份接口，不停服），只留最近 keep 份。"""
+    if not os.path.exists(DB_PATH):
+        return ""
+    bdir = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "backups")
+    os.makedirs(bdir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(DB_PATH))[0]
+    dst = os.path.join(bdir, f"{stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
+    with _lock:
+        src = sqlite3.connect(DB_PATH)
+        out = sqlite3.connect(dst)
+        try:
+            src.backup(out)
+        finally:
+            out.close()
+            src.close()
+    olds = sorted(f for f in os.listdir(bdir) if f.startswith(stem + "-") and f.endswith(".db"))
+    for f in olds[:-keep]:
+        try:
+            os.remove(os.path.join(bdir, f))
+        except OSError:
+            pass
+    return dst
 
 
 def _migrate(c) -> None:

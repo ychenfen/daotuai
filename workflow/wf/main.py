@@ -54,6 +54,12 @@ def runner() -> Runner:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure()
+    try:
+        b = db.backup()
+        if b:
+            log.info("数据库已备份：%s", b)
+    except Exception:
+        log.exception("数据库备份失败")
     n = Runner.recover()
     if n:
         log.warning("marked %d interrupted tasks as failed", n)
@@ -426,6 +432,11 @@ def edit_scene(scid: str, body: dict = Body(...)):
 async def blocking(pid: str, body: dict | None = Body(default=None)):
     body = body or {}
     return await wf().gen_blocking(pid, body.get("scene_ids"), body.get("only_missing", True), body.get("episode_no"))
+
+
+@app.post("/projects/{pid}/covers")
+async def covers(pid: str, episode_no: int | None = None):
+    return await wf().gen_covers(pid, episode_no)
 
 
 @app.post("/projects/{pid}/frames")

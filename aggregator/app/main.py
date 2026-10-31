@@ -24,6 +24,10 @@ log = logging.getLogger("agg")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init()
+    try:
+        db.backup()
+    except Exception:
+        log.exception("账本库备份失败")
     log.info("aggregator ready: %d providers / %d models", len(providers()), len(models()))
     reaper = None
     if os.environ.get("AGG_REAP", "on") != "off":

@@ -161,6 +161,18 @@ async def poster(src: str, dst: str, at: float = 0.5) -> str:
     return dst
 
 
+def last_frame(src: str, dst: str) -> str:
+    """取视频最后一帧（接下一镜的首帧用）。"""
+    ff = ffmpeg_bin()
+    if not ff:
+        raise MediaError("没有 ffmpeg，取不了尾帧")
+    _run([ff, "-y", "-loglevel", "error", "-sseof", "-0.3", "-i", src, "-update", "1", "-frames:v", "1",
+          "-q:v", "3", dst], None, 60)
+    if not os.path.exists(dst):
+        raise MediaError("尾帧提取失败")
+    return dst
+
+
 async def extract_audio(src: str, dst: str, start: float, seconds: float) -> str:
     """从视频里截一段音频（m4a/aac），用作角色音色参考。"""
     ff = ffmpeg_bin()
@@ -248,7 +260,18 @@ def build_fcpxml(title: str, clips: list[dict], w: int, h: int, folder: str, fps
 
 # ---------------- 拼接成片 ----------------
 
-def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str, burn: bool) -> dict:
+def _mix_bgm(ff: str, video: str, bgm: str, volume: float, out: str) -> None:
+    """配乐：循环铺满全片、末尾 2 秒淡出，压在镜头原声下面；字幕轨原样保留。"""
+    dur = probe(video).get("duration") or 0
+    fade = f",afade=t=out:st={max(0.0, dur - 2):.2f}:d=2" if dur > 3 else ""
+    _run([ff, "-y", "-loglevel", "error", "-i", video, "-stream_loop", "-1", "-i", bgm, "-filter_complex",
+          f"[1:a]volume={volume:.2f}{fade}[b];[0:a][b]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
+          "-map", "0:v", "-map", "[a]", "-map", "0:s?", "-c:v", "copy", "-c:s", "copy", "-c:a", "aac", "-b:a", "192k",
+          "-t", f"{dur:.3f}", out])
+
+
+def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str, burn: bool,
+                   bgm: str = "", bgm_volume: float = 0.25) -> dict:
     ff = ffmpeg_bin()
     if not ff:
         raise MediaError("没有找到 ffmpeg：请安装 ffmpeg 或设置环境变量 FFMPEG")
@@ -301,12 +324,16 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
             shutil.move(os.path.join(work, "final.mp4"), out_path)
         else:
             shutil.move(joined, out_path)
+        if bgm and os.path.exists(bgm):
+            mixed = os.path.join(work, "with_bgm.mp4")
+            _mix_bgm(ff, out_path, bgm, bgm_volume, mixed)
+            shutil.move(mixed, out_path)
         return {"path": out_path, "srt_path": srt_path, "seconds": round(t, 3), "clips": len(clips),
-                "subtitles": len(subs), "burned": bool(srt and burn)}
+                "subtitles": len(subs), "burned": bool(srt and burn), "bgm": bool(bgm)}
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 async def assemble(clips: list[dict], out_path: str, srt_path: str, aspect: str = "9:16",
-                   burn: bool = False) -> dict:
-    return await asyncio.to_thread(_assemble_sync, clips, out_path, srt_path, aspect, burn)
+                   burn: bool = False, bgm: str = "", bgm_volume: float = 0.25) -> dict:
+    return await asyncio.to_thread(_assemble_sync, clips, out_path, srt_path, aspect, burn, bgm, bgm_volume)

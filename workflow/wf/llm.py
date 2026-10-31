@@ -585,6 +585,14 @@ def blocking_prompt(scene: dict, chars: list[str], style: str, aspect: str) -> s
             f"全景机位，人物全身可见、互不遮挡、比例正确，用于后续镜头的空间参考；无文字无水印。")
 
 
+def cover_prompt(project: str, episode_title: str, text: str, style: str, cast: list[str]) -> str:
+    hook = re.sub(r"\s+", " ", re.sub(r"[△▲]", "", text))[:80]
+    who = "、".join(cast) if cast else "主角"
+    return (f"{style}风格短剧竖版海报，9:16。剧名《{project}》，{episode_title}。主角：{who}（外观严格依照参考图）。"
+            f"剧情看点：{hook}。电影级光影，人物居中有张力，背景体现剧情冲突，顶部留出标题区域。"
+            f"画面中以醒目艺术字写剧名「{project}」，不要其他文字和水印。")
+
+
 def frame_image_prompt(shot: dict, style: str, aspect: str) -> str:
     first = re.split(r"【[^】]*】", shot.get("picture") or "")
     first = next((x for x in first if x.strip()), shot.get("scene") or "")

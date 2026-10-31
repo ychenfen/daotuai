@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 import re
 import tempfile
 import zipfile
@@ -132,6 +133,20 @@ class VideoMixin:
                     record.append({"asset_id": a["id"], "name": a["name"], "version": f["current_version"],
                                    "role": "reference_audio"})
             images = images[:9]
+        elif mode == "chain":
+            # 接上一镜尾帧：取同一集上一张卡已选版本的最后一帧当首帧，镜头之间动作与画面连贯
+            prev = next((x for x in proj["shots"] if x["episode_id"] == s["episode_id"]
+                         and x["shot_no"] == s["shot_no"] - 1), None)
+            pj = prev["job"] if prev and prev.get("job") and prev["job"]["status"] == "succeeded" else None
+            if pj and pj["local_path"] and os.path.exists(pj["local_path"]) and "首帧参考" in modes:
+                dst = media.path_for(proj["id"], "frames", f"{s['id']}_tail_of_{pj['id']}.jpg")
+                if not os.path.exists(dst):
+                    media.last_frame(pj["local_path"], dst)
+                images.append({"url": media.data_uri(dst), "role": "first_frame"})
+                record.append({"chain_from": prev["code"], "job_id": pj["id"], "role": "first_frame"})
+                mode = "first_frame"
+            else:
+                return self._video_refs(proj, s, "auto", m, form_ids, material_ids)
         elif mode == "first_frame":
             if s.get("frame_path") or s.get("frame_url"):
                 images.append({"url": self._ref_url(s.get("frame_path", ""), s.get("frame_url", "")),
@@ -160,8 +175,8 @@ class VideoMixin:
         aspect = aspect_ratio or st["aspect_ratio"]
         m = await self.model_info(model)
         mode = mode or st["video_mode"]
-        if mode not in ("auto", "text", "first_frame", "reference"):
-            raise WorkflowError("mode 只能是 auto/text/first_frame/reference")
+        if mode not in ("auto", "text", "first_frame", "reference", "chain"):
+            raise WorkflowError("mode 只能是 auto/text/first_frame/reference/chain")
         shots = {s["id"]: s for s in proj["shots"]}
         submitted, skipped = [], list(quote["skipped"])
         for item in quote["items"]:
@@ -442,8 +457,30 @@ class VideoMixin:
             rows = [dict(r) for r in c.execute(sql, args).fetchall()]
         done, failed, running = [], [], []
         projects: dict[str, list] = {}
+        now = datetime.now(timezone.utc)
         for j in rows:
             code = f"{j['episode_no']}-{j['shot_no']}"
+            limit = float(self.settings(j["project_id"]).get("job_timeout_min") or 45)
+            try:
+                age = (now - datetime.strptime(j["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc))
+            except ValueError:
+                age = None
+            if age is not None and age.total_seconds() > limit * 60:
+                # 卡住的任务：先在聚合层取消（退回预扣），再标成超时失败
+                try:
+                    await self.agg.cancel_video(j["agg_task_id"])
+                except AggError as e:
+                    log.warning("cancel stuck job %s failed: %s", j["id"], e)
+                with db.tx() as c:
+                    c.execute("UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?",
+                              (f"超时（{limit:g} 分钟没出结果），已取消并退回预扣", db.now(), j["id"]))
+                    has_ok = c.execute("SELECT 1 FROM jobs WHERE shot_id=? AND status='succeeded'",
+                                       (j["shot_id"],)).fetchone()
+                    c.execute("UPDATE shots SET status=? WHERE id=?",
+                              ("video_done" if has_ok else "video_failed", j["shot_id"]))
+                failed.append({"job": j["id"], "shot": j["shot_id"], "code": code, "timeout": True})
+                projects.setdefault(j["project_id"], []).append(("bad", code))
+                continue
             try:
                 r = await self.agg.poll_video(j["agg_task_id"])
             except AggError as e:
@@ -594,7 +631,10 @@ class VideoMixin:
             name = f"EP{ep['no']:02d}"
             final = media.path_for(pid, "exports", f"{name}.mp4")
             srt = media.path_for(pid, "exports", f"{name}.srt")
-            r = await media.assemble(clips, final, srt, st["aspect_ratio"], st["burn_subtitles"])
+            bgm = next((x["local_path"] for x in proj["materials"] if x["id"] == st.get("bgm_material_id")
+                        and x["media_type"] == "audio"), "")
+            r = await media.assemble(clips, final, srt, st["aspect_ratio"], st["burn_subtitles"], bgm,
+                                     float(st.get("bgm_volume") or 0.25))
             with db.tx() as c:
                 c.execute("UPDATE episodes SET final_path=?, srt_path=?, final_seconds=?, final_at=? WHERE id=?",
                           (final, srt, r["seconds"], db.now(), ep["id"]))

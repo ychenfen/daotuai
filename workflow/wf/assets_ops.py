@@ -437,6 +437,41 @@ class AssetsMixin:
         return {"generated": done, "failed": failed}
 
     # ------------------------------------------------------------------
+    # 分集封面（竖版海报，参考本集主要角色的定版图）
+    # ------------------------------------------------------------------
+
+    async def gen_covers(self, pid: str, episode_no: int | None = None) -> dict:
+        proj = self.get(pid)
+        st = proj["settings"]
+        chars = [a for a in proj["assets"] if a["kind"] in ("character", "creature") and a["display_url"]]
+        targets = [e for e in proj["episodes"] if episode_no is None or e["no"] == episode_no]
+
+        async def one(e):
+            cast = sorted([a for a in chars if e["no"] in a["episodes"]], key=lambda a: -a["usage"])[:3]
+            refs = [self._ref_url(a["local_path"], a["image_url"]) for a in cast]
+            prompt = llm.cover_prompt(proj["name"], e["title"], e["raw_text"], proj["style"], [a["name"] for a in cast])
+            res = await self.agg.image(st["image_model"], prompt, size=image_size("9:16", st["image_resolution"]),
+                                       refs=refs or None, idem=f"cover:{e['id']}:{short_hash(prompt, len(refs))}")
+            url = (res.get("data") or [{}])[0].get("url") or ""
+            local, _ = await self._store_image(pid, "covers", f"EP{e['no']:02d}_{short_hash(prompt)[:6]}", url,
+                                               seed=e["id"])
+            charged = float((res.get("billing") or {}).get("charged_rmb") or 0)
+            with db.tx() as c:
+                c.execute("UPDATE episodes SET cover_path=?, cover_charged_rmb=cover_charged_rmb+? WHERE id=?",
+                          (local, charged, e["id"]))
+            return media.url_of(local)
+
+        done, failed = [], []
+        for e, out in zip(targets, await self.gather_limited(one(e) for e in targets)):
+            if isinstance(out, (AggError, media.MediaError)):
+                failed.append({"episode": e["no"], "error": str(out)[:200]})
+            elif isinstance(out, Exception):
+                raise out
+            else:
+                done.append({"episode": e["no"], "url": out})
+        return {"generated": done, "failed": failed}
+
+    # ------------------------------------------------------------------
     # 分镜图（每镜一张预览，可选当首帧）
     # ------------------------------------------------------------------
 
