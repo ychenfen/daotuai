@@ -465,13 +465,18 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ExtrasMixin):
                                  movement,picture,performance,blocking,dialogue,sfx,transition,original_text,
                                  characters_json,scene_asset,status,source,updated_at)
                                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                              (_id("shot"), pid, ep["id"], sc["id"] if sc else "", n, s["duration"],
+                              (_id("shot"), pid, ep["id"], sc["id"] if sc else "", n,
+                               llm.fit_duration(s["duration"], s["dialogue"], lo, hi),
                                loc or (sc["heading"] if sc else ""), s["size"], s["angle"], s["movement"],
                                s["picture"], s["performance"], s["blocking"], s["dialogue"], s["sfx"],
                                s["transition"], s.get("original_text", ""), db.dump(s["characters"]), scene_asset,
                                "storyboard_ready", source, db.now()))
                 c.execute("UPDATE episodes SET final_path='', srt_path='', final_seconds=0 WHERE id=?", (ep["id"],))
-            results.append({"episode": ep["no"], "shots": len(shots), "source": source})
+            long_lines = [f"{ep['no']}-{n}" for n, s in enumerate(shots, start=1) if llm.speech_seconds(s["dialogue"]) > hi]
+            results.append({"episode": ep["no"], "shots": len(shots), "source": source, "long_dialogue": long_lines})
+            if long_lines:
+                self.notify(pid, "warning", f"第 {ep['no']} 集有 {len(long_lines)} 张卡台词超过 {hi} 秒",
+                            "建议拆卡：" + "、".join(long_lines[:20]))
         results.sort(key=lambda r: r["episode"])
         self.refresh_status(pid)
         return {"project": pid, "results": results, "state": self.get(pid)}

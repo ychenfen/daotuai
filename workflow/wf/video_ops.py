@@ -9,7 +9,7 @@ import re
 import tempfile
 import zipfile
 
-from . import db, media
+from . import db, llm, media
 from .agg import AggError
 from .errors import BudgetExceeded, Conflict, NotFound, WorkflowError
 from .util import new_id, short_hash
@@ -79,7 +79,9 @@ class VideoMixin:
         targets, skipped = self._pick_targets(proj, shot_ids, force, episode_no)
         items, total = [], 0.0
         for s in targets:
-            dur = self._clamp_duration(duration or s["duration_s"], m)
+            # 没手动指定时长时，按台词长度补足（老分镜卡也适用）
+            dur = self._clamp_duration(duration or max(float(s["duration_s"] or 0),
+                                                       -(-llm.speech_seconds(s.get("dialogue") or "") // 1)), m)
             q = await self.agg.quote(model, spec=res, seconds=dur)
             items.append({"shot": s["id"], "code": s["code"], "episode": s["episode_no"], "shot_no": s["shot_no"],
                           "seconds": dur, "rmb": q["rmb"], "points": q.get("points")})

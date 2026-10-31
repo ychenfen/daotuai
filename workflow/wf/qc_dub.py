@@ -57,13 +57,60 @@ _MALE = [v["id"] for v in VOICES if v["gender"] == "m" and not v.get("dialect") 
 _FEMALE_HINT = re.compile(r"女|她|妃|姬|娘|母|姐|妹|婆|后$|公主|少女|仙子|夫人|小姐|丫鬟|闺")
 _OLD_HINT = re.compile(r"老|翁|爷|叟|长老|师尊|祖|父亲|爹")
 NARRATOR = {"旁白", "画外音", "OS", "VO", "解说", "字幕"}
-QC_PROMPT = """你是短剧视频质检员。前几张是本镜头应出现的角色/场景定版参考图（会标注名字），后面是成片里均匀抽出的帧。
+QC_PROMPT = """你是严格的短剧视频质检员。前几张是本镜头应出现的角色/场景定版参考图（会标注名字），后面是成片里均匀抽出的帧。
 请按分镜要求逐项核对，输出 JSON（不要其他文字）：
-{"score":0-100,"character_consistency":0-100,"prompt_adherence":0-100,
- "issues":[{"type":"角色不一致|画面不符|字幕水印|画面崩坏|多余人物|其他","detail":"一句话"}],
+{"character_consistency":0-100,"prompt_adherence":0-100,
+ "issues":[{"type":"角色不一致|画面不符|字幕水印|画面崩坏|多余人物|其他","severity":"轻微|明显|严重","detail":"一句话"}],
  "summary":"一句话结论"}
-打分标准：角色长相/服装与参考图明显不一致扣重分；出现字幕、水印、文字扣分；肢体/五官崩坏扣重分；
-动作/景别与分镜不符酌情扣分。只写看得到的问题，不要编造。"""
+character_consistency：只看角色长相、发型、服装是否与参考图一致。
+prompt_adherence：只看画面是否演出了分镜写的动作、情绪、景别和关键道具。分镜要求的关键动作没有出现，最多 50 分；
+  画面内容与分镜基本无关，最多 30 分。
+severity：严重 = 观众一眼能看出、必须重抽；明显 = 影响观感、建议重抽；轻微 = 可以接受。
+只写看得到的问题，不要编造；没有问题 issues 给空数组。"""
+
+# 质检分数：不用模型自己给的总分（实测它会给 92 分，同时在评语里写“与分镜严重不符”），
+# 按两个分项取较低者为主，再按问题严重程度扣分。
+_THROTTLED = re.compile(r"Throttling|rate.?limit|RateQuota|\b429\b|too many requests", re.I)
+_SEV_PENALTY = {"严重": 20, "明显": 8, "轻微": 2}
+_HARD_TYPES = {"角色不一致", "画面崩坏", "字幕水印"}
+_SEVERE_WORDS = re.compile(r"严重|完全不符|完全没有|未执行|没有执行|未按|没有按|未出现|没有出现|崩坏|错误切入")
+
+
+def _sub(v) -> int | None:
+    try:
+        return max(0, min(100, int(float(v))))
+    except (TypeError, ValueError):
+        return None
+
+
+def vision_score(vis: dict) -> tuple[int, bool, bool]:
+    """视觉结果 → (分数, 必须重抽, 建议人工看)。"""
+    cc, pa = _sub(vis.get("character_consistency")), _sub(vis.get("prompt_adherence"))
+    subs = [x for x in (cc, pa) if x is not None]
+    if subs:
+        base = round(0.6 * min(subs) + 0.4 * (sum(subs) / len(subs)))
+    else:
+        base = _sub(vis.get("score")) or 0
+    hard = severe = False
+    penalty = 0
+    for i in vis.get("issues") or []:
+        sev = i.get("severity") or ("严重" if _SEVERE_WORDS.search(str(i.get("detail", ""))) else "明显")
+        if sev not in _SEV_PENALTY:
+            sev = "明显"
+        i["severity"] = sev
+        penalty += _SEV_PENALTY[sev]
+        if sev == "严重":
+            severe = True
+            if i.get("type") in _HARD_TYPES:
+                hard = True
+    if _SEVERE_WORDS.search(str(vis.get("summary", ""))):
+        severe = True
+    score = max(0, min(100, base - min(penalty, 40)))
+    if cc is not None and cc < 60:
+        hard = True
+    if severe and score > 74:      # 有严重问题就不能直接通过
+        score = 74
+    return score, hard, severe or (pa is not None and pa < 60)
 
 
 def qc_view(raw: str) -> dict | None:
@@ -153,13 +200,11 @@ class QcDubMixin:
         charged = float(((res or {}).get("billing") or {}).get("charged_rmb") or 0)
         text = (((res.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
         data = llm._extract_json(text)
-        if not data or "score" not in data:
+        if not data or not any(k in data for k in ("score", "character_consistency", "prompt_adherence")):
             return None, charged, (text or "")[:200]
-        try:
-            data["score"] = max(0, min(100, int(float(data["score"]))))
-        except (TypeError, ValueError):
-            return None, charged, text[:200]
         data["issues"] = [i for i in (data.get("issues") or []) if isinstance(i, dict)][:8]
+        data["model_score"] = _sub(data.get("score"))
+        data["score"], data["hard_fail"], data["needs_review"] = vision_score(data)
         return data, charged, ""
 
     async def qc_job(self, job_id: str, force: bool = False, vision: bool | None = None) -> dict:
@@ -211,7 +256,8 @@ class QcDubMixin:
             score = 100 - 30 * len(errors) - 10 * len(warns)
         score = max(0, min(100, score))
         th = int(st.get("qc_pass_score") or 75)
-        verdict = "fail" if errors or score < th - 20 else ("pass" if score >= th else "warn")
+        verdict = "fail" if errors or score < th - 20 or (vis or {}).get("hard_fail") else (
+            "pass" if score >= th and not (vis or {}).get("needs_review") else "warn")
         issues = [{"type": c["name"], "detail": c["detail"]} for c in errors + warns]
         issues += (vis or {}).get("issues", [])
         summary = (vis or {}).get("summary") or (
@@ -358,8 +404,33 @@ class QcDubMixin:
             with db.tx() as c:
                 c.execute("UPDATE projects SET audio_charged_rmb=audio_charged_rmb+? WHERE id=?", (rmb, pid))
 
+    def _tts_sem(self) -> asyncio.Semaphore:
+        """语音合成单独限并发：百炼 TTS 的频率限制比文本低，2026-10-31 实测 4 路并发就有镜头被限流。"""
+        loop = asyncio.get_running_loop()
+        sem = getattr(self, "_tts_sem_obj", None)
+        if sem is None or getattr(self, "_tts_sem_loop", None) is not loop:
+            sem = asyncio.Semaphore(max(1, int(os.environ.get("WORKFLOW_TTS_PARALLEL", "2"))))
+            self._tts_sem_obj, self._tts_sem_loop = sem, loop
+        return sem
+
+    async def _tts_call(self, model: str, text: str, voice: str) -> dict:
+        """限流（Throttling / rate limit / 429）时退避重试，其余错误直接抛。"""
+        tries = max(1, int(os.environ.get("WORKFLOW_TTS_RETRIES", "5")))
+        delay = float(os.environ.get("WORKFLOW_TTS_BACKOFF_S", "2"))
+        for k in range(tries):
+            try:
+                async with self._tts_sem():
+                    return await self.agg.tts(model, text, voice, idem=f"tts-{short_hash(model + voice + text)}")
+            except AggError as e:
+                if k == tries - 1 or not _THROTTLED.search(f"{e} {e.code or ''} {e.status or ''}"):
+                    raise
+                log.info("tts throttled, retry %d in %.1fs", k + 1, delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+        raise WorkflowError("unreachable")
+
     async def _tts_to_file(self, pid: str, model: str, text: str, voice: str, path: str) -> float:
-        res = await self.agg.tts(model, text, voice, idem=f"tts-{short_hash(model + voice + text)}")
+        res = await self._tts_call(model, text, voice)
         url = res.get("url") or ""
         if not url or media.is_mock_url(url):
             secs = float((parse_qs(urlparse(url).query).get("sec") or [0])[0] or 0) or max(0.6, len(text) * 0.22)

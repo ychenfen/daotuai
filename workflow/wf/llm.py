@@ -326,7 +326,34 @@ STORYBOARD_SYSTEM = """你是短剧分镜师。把一集剧本按场次拆成"�
 要求：
 1. 时长在 %d~%d 秒之间，优先接近 %d 秒；segments 首尾相接覆盖整镜；
 2. 必须保留原剧本的人物、动作、台词，不得新增情节；
-3. 最多 %d 张卡；scene_code 用给定的场次编号。"""
+3. 最多 %d 张卡；scene_code 用给定的场次编号；
+4. 有台词的卡，时长不得短于台词正常念完的时间（约每秒 4 个字，另留 1 秒）；一张卡装不下的台词拆到下一张卡。"""
+
+
+SPEECH_CPS = 4.5   # 短剧台词正常语速：每秒约 4~5 个字
+
+
+def speech_seconds(dialogue: str) -> float:
+    """一张卡的台词按正常语速念完要几秒（含句间停顿和首尾留白）。没有台词返回 0。
+    镜头时长不能短于它，否则配音只能加速到失真、视频模型自带的声音也会被截断。"""
+    total, lines = 0.0, 0
+    for ln in (dialogue or "").splitlines():
+        ln = ln.strip().strip("{}").strip()
+        m = re.match(r"^([^：:「“\"]{1,16})[：:]\s*(.+)$", ln)
+        text = m.group(2) if m else ln
+        text = re.sub(r"[（(][^）)]*[）)]", "", text)
+        n = len(re.sub(r"[\W_]", "", text))
+        if n:
+            total += n / SPEECH_CPS + 0.35
+            lines += 1
+    return round(total + 1.0, 1) if lines else 0.0
+
+
+def fit_duration(duration: float, dialogue: str, lo: float, hi: float) -> float:
+    """分镜给的时长 → 至少装得下台词，并落在模型支持的范围内。"""
+    need = speech_seconds(dialogue)
+    d = max(float(duration or 0), float(-(-need // 1)) if need else 0.0)
+    return float(max(lo, min(hi, d or lo)))
 
 
 def _segment_seconds(body: str, is_dialogue: bool) -> int:

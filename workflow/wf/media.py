@@ -155,10 +155,21 @@ def probe(path: str) -> dict:
 
 
 def wav_seconds(path: str) -> float:
-    """wav 时长（不依赖 ffprobe）；不是 wav 时退回 ffprobe。"""
+    """wav 时长（不依赖 ffprobe）；不是 wav 时退回 ffprobe。
+    百炼 TTS 返回的是流式写出的 wav，文件头里的长度是占位值（常见 0x7FFFFFFF），
+    只信文件头会把几秒的台词算成几小时 → 配音被一律加速到上限并误报超时长。所以和文件实际大小交叉核对。"""
     try:
         with wave.open(path, "rb") as w:
-            return w.getnframes() / float(w.getframerate() or 1)
+            rate = float(w.getframerate() or 1)
+            frame_bytes = max(1, w.getnchannels() * w.getsampwidth())
+            nframes = w.getnframes()
+        with open(path, "rb") as f:
+            head = f.read(4096)
+        i = head.find(b"data")
+        if i >= 0:
+            by_size = max(0, os.path.getsize(path) - (i + 8)) // frame_bytes
+            nframes = min(nframes, by_size) if nframes else by_size
+        return nframes / rate
     except (wave.Error, EOFError, OSError):
         return float(probe(path).get("duration") or 0)
 

@@ -617,6 +617,31 @@ async def main() -> int:
         check("台词拆句：角色/旁白/去表演括号/无前缀算旁白",
               lines == [("孔宣", "你也配？"), ("旁白", "三百年后。"), ("猪婆龙", "那里！"), ("旁白", "一句没有说话人的话")],
               str(lines))
+        # 百炼 TTS 的流式 wav：文件头长度是占位值，时长必须按文件大小算
+        import struct as _st, wave as _wv  # noqa: E401
+        bogus = os.path.join(tempfile.gettempdir(), "wf_bogus_len.wav")
+        with _wv.open(bogus, "wb") as _w:
+            _w.setnchannels(1); _w.setsampwidth(2); _w.setframerate(24000); _w.writeframes(b"\0\0" * 24000 * 2)
+        _b = bytearray(open(bogus, "rb").read()); _i = _b.find(b"data")
+        _b[_i + 4:_i + 8] = _st.pack("<I", 0x7FFFFFFF); _b[4:8] = _st.pack("<I", 0x7FFFFFFF)
+        open(bogus, "wb").write(_b)
+        check("wav 头长度是占位值时按文件实际大小算时长", abs(media.wav_seconds(bogus) - 2.0) < 0.01,
+              str(media.wav_seconds(bogus)))
+        from wf.qc_dub import vision_score  # noqa: E402
+        v1 = vision_score({"score": 92, "character_consistency": 95, "prompt_adherence": 55, "summary": "人物一致，但与分镜严重不符",
+                           "issues": [{"type": "画面不符", "detail": "关键动作（擦过、后跳）未按分镜执行"}]})
+        v2 = vision_score({"score": 95, "character_consistency": 95, "prompt_adherence": 90, "summary": "高度一致",
+                           "issues": [{"type": "其他", "severity": "轻微", "detail": "背景细节略低"}]})
+        v3 = vision_score({"character_consistency": 50, "prompt_adherence": 90, "issues": []})
+        check("质检打分：不信模型总分，动作严重不符不能通过", v1[0] < 75 and v1[2], str(v1))
+        check("质检打分：只有轻微问题照常通过", v2[0] >= 75 and not v2[1] and not v2[2], str(v2))
+        check("质检打分：角色一致性低于 60 直接不合格", v3[1], str(v3))
+        check("台词时长估算：19 字约 5~6 秒、无台词为 0",
+              5 <= llm.speech_seconds("孔宣（皱眉）：此乃何物？红黄交替，莫不是哪位道友在斗法？") <= 6.5
+              and llm.speech_seconds("") == 0, "")
+        check("镜头时长按台词补足、不超过模型上限",
+              llm.fit_duration(5, "孔宣：此乃何物？红黄交替，莫不是哪位道友在斗法？", 2, 15) >= 6
+              and llm.fit_duration(5, "", 2, 15) == 5 and llm.fit_duration(5, "孔宣：" + "啊" * 200, 2, 15) == 15, "")
         await wf_main.wf().drain_background()
         st = await j(await c.get(f"/projects/{pid}"))
         done = [s for s in st["shots"] if s["job"] and s["job"]["status"] == "succeeded"]
@@ -695,6 +720,33 @@ async def main() -> int:
             d2 = await j(await c.post(f"/projects/{pid}/dub", json={"shot_ids": [talk["id"]]}))
             check("台词没变不重复配音（不重复扣费）", d2["dubbed"] == 0 and d2["skipped"] == 1, json.dumps(d2)[:200])
             check("配音花费计入项目", st["spend"]["audio_rmb"] > 0, json.dumps(st["spend"]))
+            # 百炼限流：退避重试后成功；同时在跑的 TTS 请求不超过上限
+            from wf.agg import AggError as _AE  # noqa: E402
+            W = wf_main.wf()
+            orig_tts, calls, live, peak = W.agg.tts, {"n": 0}, {"n": 0}, {"n": 0}
+            os.environ["WORKFLOW_TTS_BACKOFF_S"] = "0.01"
+
+            async def flaky_tts(model, text, voice, idem=None):
+                live["n"] += 1; peak["n"] = max(peak["n"], live["n"])
+                try:
+                    await asyncio.sleep(0.02)
+                    calls["n"] += 1
+                    if calls["n"] % 3 == 1:
+                        raise _AE('tts failed 502: all routes failed: {"code":"Throttling.RateQuota"}', 502)
+                    return await orig_tts(model, text, voice, idem=idem)
+                finally:
+                    live["n"] -= 1
+            W.agg.tts = flaky_tts
+            try:
+                many = [s for s in st["shots"] if s["dialogue"]][:4]
+                rr = await W.dub_shots(pid, shot_ids=[s["id"] for s in many], force=True)
+            finally:
+                W.agg.tts = orig_tts
+                os.environ.pop("WORKFLOW_TTS_BACKOFF_S", None)
+            check("配音遇到限流自动重试，全部成功", not rr["errors"] and rr["dubbed"] == len(many) and calls["n"] > rr["dubbed"],
+                  json.dumps({k: rr[k] for k in ("dubbed", "errors")}, ensure_ascii=False)[:300])
+            check("配音并发不超过 2 路", peak["n"] <= 2, str(peak))
+            st = await j(await c.get(f"/projects/{pid}"))
             # 很长的台词 → 加速
             long_line = "孔宣：" + "这一局我看得清清楚楚，量化也算不过我，" * 6
             talk = next(s for s in st["shots"] if s["id"] == talk["id"])
