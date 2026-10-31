@@ -113,7 +113,7 @@ function renderChrome() {
   const p = S.p, sp = p && p.spend, t = p && p.task, busy = t && (t.status === 'running' || t.status === 'queued');
   const pct = sp ? (sp.budget_rmb > 0 ? Math.min(100, sp.total_rmb / sp.budget_rmb * 100) : 100) : 0;
   $('#top').innerHTML = `<span class="title">${esc((PAGES.find(x => x[0] === S.page) || [])[2] || '')}</span>
-    ${sp ? `<span class="pill" title="项目已花 / 预算">已花 <b>${rmb(sp.total_rmb)}</b> / ${rmb(sp.budget_rmb)}
+    ${sp ? `<span class="pill" title="视频 ${rmb(sp.videos_rmb)} · 图片 ${rmb(sp.images_rmb)} · 文本 ${rmb(sp.text_rmb || 0)}（预算只卡视频与图片的提交）">已花 <b>${rmb(sp.total_rmb)}</b> / ${rmb(sp.budget_rmb)}
       <span class="meter"><div class="${pct >= 100 ? 'over' : ''}" style="width:${pct}%"></div></span></span>` : ''}
     ${t ? `<span class="pill" title="${esc(t.error || '')}">任务 ${badge(t.status)} ${(t.steps || []).filter(s => s.status === 'succeeded').length}/${(t.steps || []).length || '…'}</span>` : ''}
     <span class="spacer"></span>
