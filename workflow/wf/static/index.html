@@ -1,1 +1,378 @@
-<!doctype html><html><body>placeholder</body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>短剧工作台</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--line:#e3e6ea;--text:#1d2129;--muted:#6b7280;--accent:#2563eb;--accent-soft:#e8efff;
+--ok:#16a34a;--warn:#d97706;--bad:#dc2626;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+button{font:inherit;border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:#c5cad1}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover{background:#1d4ed8}
+button.small{padding:2px 8px;font-size:12px}
+button:disabled{opacity:.5;cursor:not-allowed}
+input,select,textarea{font:inherit;border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:#fff;color:var(--text);width:100%}
+textarea{resize:vertical}
+.layout{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+aside{background:#fff;border-right:1px solid var(--line);padding:14px;display:flex;flex-direction:column;gap:10px}
+aside h1{font-size:16px;margin:0 0 6px}
+.plist{display:flex;flex-direction:column;gap:4px;overflow:auto}
+.pitem{padding:8px 10px;border-radius:8px;cursor:pointer}
+.pitem:hover{background:var(--bg)}
+.pitem.on{background:var(--accent-soft);color:var(--accent)}
+.pitem small{display:block;color:var(--muted)}
+main{padding:18px 22px;min-width:0}
+.head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.head h2{margin:0;font-size:20px}
+.badge{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;background:#eef0f3;color:var(--muted)}
+.badge.ok{background:#e7f6ec;color:var(--ok)}.badge.warn{background:#fdf2e3;color:var(--warn)}.badge.bad{background:#fde8e8;color:var(--bad)}
+.badge.live{background:#fde8e8;color:var(--bad)}
+.spacer{flex:1}
+.tabs{display:flex;gap:4px;margin:14px 0;border-bottom:1px solid var(--line);overflow-x:auto}
+.tab{padding:8px 14px;cursor:pointer;border-bottom:2px solid transparent;color:var(--muted);white-space:nowrap}
+.tab.on{color:var(--accent);border-color:var(--accent)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px;margin-bottom:12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.muted{color:var(--muted)}
+.err{color:var(--bad)}
+.thumb{width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:8px;background:#eef0f3;display:block}
+.thumb.wide{aspect-ratio:16/9}
+.vers{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
+.vers img{width:36px;height:48px;object-fit:cover;border-radius:4px;border:2px solid transparent;cursor:pointer;background:#eef0f3}
+.vers img.on{border-color:var(--accent)}
+table{width:100%;border-collapse:collapse}
+th,td{border-bottom:1px solid var(--line);padding:8px 6px;text-align:left;vertical-align:top}
+th{font-weight:600;color:var(--muted);font-size:12px}
+.shot-frame{width:64px;aspect-ratio:9/16;object-fit:cover;border-radius:6px;background:#eef0f3;display:block}
+.chip{display:inline-block;padding:1px 8px;border-radius:99px;background:var(--accent-soft);color:var(--accent);font-size:12px;margin:2px 4px 2px 0}
+.chip.warn{background:#fdf2e3;color:var(--warn)}
+.chip.bad{background:#fde8e8;color:var(--bad)}
+.steps{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.step{padding:4px 10px;border-radius:8px;background:#eef0f3;font-size:12px}
+.step.running{background:var(--accent-soft);color:var(--accent)}
+.step.succeeded{background:#e7f6ec;color:var(--ok)}
+.step.failed{background:#fde8e8;color:var(--bad)}
+.bar{height:8px;border-radius:99px;background:#eef0f3;overflow:hidden;min-width:160px}
+.bar>div{height:100%;background:var(--accent)}
+.bar>div.over{background:var(--bad)}
+video{width:100%;max-height:420px;background:#000;border-radius:8px}
+.toast{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:20}
+.toast div{background:#1d2129;color:#fff;padding:10px 14px;border-radius:8px;max-width:420px;box-shadow:0 4px 16px rgba(0,0,0,.2)}
+.toast div.bad{background:var(--bad)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:30}
+.modal .card{width:min(640px,92vw);max-height:86vh;overflow:auto}
+.kv{display:grid;grid-template-columns:140px 1fr;gap:10px 12px;align-items:center}
+.ep-title{font-weight:600;margin:4px 0 8px}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+pre{white-space:pre-wrap;word-break:break-all;margin:0;font-size:12px}
+.tablewrap{overflow-x:auto}
+@media (max-width:820px){.layout{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}
+  main{padding:14px 16px}.kv{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <h1>短剧工作台</h1>
+    <div class="row"><input id="newName" placeholder="新项目名"><button class="primary" onclick="createProject()">新建</button></div>
+    <div class="plist" id="plist"></div>
+    <div class="spacer"></div>
+    <div id="health" class="muted" style="font-size:12px"></div>
+  </aside>
+  <main id="main"><div class="empty">左侧新建或选择一个项目</div></main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const S = {pid: null, p: null, tab: 'script', models: [], timer: null};
+const KIND = {character: '角色', scene: '场景', prop: '道具'};
+const STATUS = {draft:'草稿', script_ready:'剧本就绪', parsed:'已分集', assets_ready:'资产就绪', storyboard_done:'分镜完成',
+  prompts_done:'提示词完成', videos_running:'出片中', videos_done:'视频完成', final_ready:'成片完成',
+  storyboard_ready:'待提示词', prompt_ready:'待出片', video_submitted:'出片中', video_done:'已出片', video_failed:'失败',
+  submitted:'已提交', running:'生成中', succeeded:'成功', failed:'失败', cancelled:'已取消', queued:'排队'};
+const MODE = {auto:'自动', text:'文生视频', first_frame:'分镜图作首帧', reference:'资产参考图'};
+
+function esc(s){return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function toast(msg, bad){const d=document.createElement('div');if(bad)d.className='bad';d.textContent=msg;
+  document.getElementById('toast').appendChild(d);setTimeout(()=>d.remove(), bad?7000:3500)}
+function badge(st){const cls={succeeded:'ok',video_done:'ok',final_ready:'ok',videos_done:'ok',failed:'bad',video_failed:'bad',
+  running:'warn',submitted:'warn',video_submitted:'warn',videos_running:'warn',queued:'warn'}[st]||'';
+  return `<span class="badge ${cls}">${esc(STATUS[st]||st)}</span>`}
+function isLive(id){return !!(S.models.find(m=>m.id===id)||{}).live}
+
+async function api(method, path, body, raw){
+  const opt = {method, headers:{}};
+  if (raw){opt.body = raw}
+  else if (body !== undefined){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(body)}
+  const r = await fetch(path, opt);
+  let data = null; try{data = await r.json()}catch(e){}
+  if (!r.ok){const err = new Error((data&&data.error&&data.error.message)||(data&&data.detail)||('HTTP '+r.status));
+    err.status=r.status;err.data=data;throw err}
+  return data;
+}
+async function act(btn, fn, okMsg){
+  if (btn) btn.disabled = true;
+  try{const r = await fn(); if(okMsg) toast(okMsg); await load(); return r}
+  catch(e){toast(e.message, true); if(e.status===409 && e.data && e.data.error && e.data.error.detail) showConflict(e.data.error); await load()}
+  finally{ if (btn) btn.disabled = false }
+}
+
+// ---------------- 项目列表 ----------------
+async function loadList(){
+  const {items} = await api('GET','/projects');
+  document.getElementById('plist').innerHTML = items.map(p=>`<div class="pitem ${p.id===S.pid?'on':''}" onclick="openProject('${p.id}')">
+    ${esc(p.name)}<small>${esc(STATUS[p.status]||p.status)} · ${p.episodes} 集 · ${p.shots} 镜</small></div>`).join('') || '<div class="muted">还没有项目</div>';
+}
+async function createProject(){
+  const name = document.getElementById('newName').value.trim();
+  if (!name) return toast('先填项目名', true);
+  try{const p = await api('POST','/projects',{name}); document.getElementById('newName').value=''; S.tab='script'; await openProject(p.id)}
+  catch(e){toast(e.message,true)}
+}
+async function openProject(pid){S.pid = pid; location.hash = pid; await load()}
+
+async function load(){
+  await loadList();
+  if (!S.pid){document.getElementById('main').innerHTML='<div class="empty">左侧新建或选择一个项目</div>'; return}
+  try{S.p = await api('GET','/projects/'+S.pid)}
+  catch(e){S.pid=null; document.getElementById('main').innerHTML='<div class="empty">项目不存在</div>'; return}
+  // 正在输入时不重绘，避免把用户的草稿冲掉
+  const typing = document.activeElement && ['TEXTAREA','INPUT'].includes(document.activeElement.tagName) && document.getElementById('main').contains(document.activeElement);
+  if (!typing) render();
+  const t = S.p.task;
+  clearTimeout(S.timer);
+  const active = t && (t.status==='running'||t.status==='queued');
+  const jobsRunning = S.p.shots.some(s=>s.jobs.some(j=>j.status==='submitted'||j.status==='running'));
+  if (active || jobsRunning) S.timer = setTimeout(load, active ? 2000 : 8000);
+}
+
+// ---------------- 主视图 ----------------
+function render(){
+  const p = S.p, sp = p.spend;
+  const pct = sp.budget_rmb>0 ? Math.min(100, sp.total_rmb/sp.budget_rmb*100) : 100;
+  const t = p.task, busy = t && (t.status==='running'||t.status==='queued');
+  const tabs = [['script','剧本'],['assets','资产'],['board','分镜与提示词'],['videos','视频'],['final','成片'],['settings','设置']];
+  document.getElementById('main').innerHTML = `
+  <div class="head">
+    <h2>${esc(p.name)}</h2>${badge(p.status)}<span class="muted">${esc(p.style)} · ${esc(p.settings.aspect_ratio)}</span>
+    <div class="spacer"></div>
+    <div title="已花 / 预算"><div class="muted" style="font-size:12px">已花 ¥${sp.total_rmb.toFixed(2)} / 预算 ¥${sp.budget_rmb.toFixed(2)}</div>
+      <div class="bar"><div class="${pct>=100?'over':''}" style="width:${pct}%"></div></div></div>
+    <button class="primary" onclick="runAll(this)" ${busy?'disabled':''}>${busy?'后台运行中…':'一键全流程'}</button>
+  </div>
+  ${t ? taskPanel(t) : ''}
+  <div class="tabs">${tabs.map(([k,v])=>`<div class="tab ${S.tab===k?'on':''}" onclick="S.tab='${k}';render()">${v}</div>`).join('')}</div>
+  <div id="tabBody">${({script:tabScript,assets:tabAssets,board:tabBoard,videos:tabVideos,final:tabFinal,settings:tabSettings})[S.tab]()}</div>`;
+}
+
+function taskPanel(t){
+  const info = s => s.info ? Object.entries(s.info).map(([k,v])=>`${k}: ${typeof v==='object'?JSON.stringify(v):v}`).join('，') : (s.error||'');
+  return `<div class="card" style="margin-top:12px"><div class="row"><b>最近任务</b>${badge(t.status)}<span class="muted">${esc(t.created_at)} UTC</span></div>
+  <div class="steps">${(t.steps||[]).map(s=>`<span class="step ${s.status}" title="${esc(info(s))}">${esc(s.name)}</span>`).join('')}</div>
+  ${t.error?`<div class="err" style="margin-top:6px">${esc(t.error)}</div>`:''}</div>`;
+}
+async function runAll(btn){
+  const st = S.p.settings, live = [st.text_model, st.image_model, st.video_model].filter(isLive);
+  if (live.length && !confirm(`这些模型会真实扣费：${live.join('、')}。\n项目预算 ¥${st.budget_rmb}，超出预算的视频不会提交。继续？`)) return;
+  await act(btn, ()=>api('POST',`/projects/${S.pid}/run`), '已在后台开始，进度会自动刷新');
+}
+
+// ---------------- 剧本 ----------------
+function tabScript(){
+  const p = S.p;
+  return `<div class="card"><div class="row" style="margin-bottom:8px"><b>剧本</b><span class="muted">用“第1集 / 第2集”分集；“1-1 日 外 金鸡岭”这样的行会被识别为场景；“人物：A、B”会被识别为角色表</span></div>
+  <textarea id="script" rows="18" placeholder="粘贴剧本……">${esc(p.script_text)}</textarea>
+  <div class="row" style="margin-top:8px"><button class="primary" onclick="saveScript(this)">保存剧本</button>
+  <button onclick="parseEps(this,false)">保存并分集</button><button onclick="parseEps(this,true)" title="会清空已有分镜和视频">强制重新分集</button></div></div>
+  <div class="card"><b>分集（${p.episodes.length}）</b>${p.episodes.map(e=>`<div style="margin-top:8px"><span class="chip">${esc(e.title)}</span>
+  <span class="muted">${esc(e.raw_text.slice(0,90))}…</span></div>`).join('') || '<div class="muted">还没分集</div>'}</div>`;
+}
+async function saveScript(btn){const text=document.getElementById('script').value; await act(btn,()=>api('POST',`/projects/${S.pid}/script`,{text}),'剧本已保存')}
+async function parseEps(btn, force){
+  if (force && !confirm('重新分集会清空已有分镜与视频，确定？')) return;
+  const text=document.getElementById('script').value;
+  await act(btn, async()=>{await api('POST',`/projects/${S.pid}/script`,{text}); return api('POST',`/projects/${S.pid}/parse?force=${force}`)}, '已分集');
+}
+
+// ---------------- 资产 ----------------
+function tabAssets(){
+  const a = S.p.assets;
+  return `<div class="card row"><button class="primary" onclick="act(this,()=>api('POST','/projects/${S.pid}/assets/extract'),'资产已抽取')">从剧本抽取资产</button>
+  <button onclick="genImages(this)">给缺图的资产出图</button>
+  <span class="spacer"></span><select id="newKind" style="width:90px"><option value="character">角色</option><option value="scene">场景</option><option value="prop">道具</option></select>
+  <input id="newAsset" placeholder="新资产名" style="width:160px"><button onclick="addAsset(this)">添加</button></div>
+  ${a.length? `<div class="grid">${a.map(assetCard).join('')}</div>` : '<div class="empty">还没有资产。先写剧本，再点“从剧本抽取资产”。</div>'}`;
+}
+function assetCard(a){
+  const wide = a.kind==='character' ? '' : 'wide';
+  return `<div class="card" style="margin:0">
+  ${a.display_url?`<img class="thumb ${wide}" src="${esc(a.display_url)}">`:`<div class="thumb ${wide}"></div>`}
+  <div class="row" style="margin-top:8px"><span class="chip">${KIND[a.kind]}</span><b>${esc(a.name)}</b><span class="muted">v${a.current_version}</span></div>
+  <textarea rows="3" style="margin-top:6px" placeholder="外貌/服装/特征（出图用）" onchange="editAsset('${a.id}',${a.rev},{description:this.value})">${esc(a.description)}</textarea>
+  <input style="margin-top:6px" placeholder="别称，用逗号分隔" value="${esc(a.aliases.join('，'))}" onchange="editAsset('${a.id}',${a.rev},{aliases:this.value.split(/[,，]/)})">
+  <div class="vers">${a.versions.map(v=>`<img title="v${v.version} ${esc(v.source)}" class="${v.version===a.current_version?'on':''}" src="${esc(v.display_url)}" onclick="selVer('${a.id}',${v.version})">`).join('')}</div>
+  <div class="row" style="margin-top:8px"><button class="small" onclick="genOne('${a.id}',this)">${a.current_version?'重新出图':'出图'}</button>
+  <button class="small" onclick="this.nextElementSibling.click()">上传</button><input type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="upload('${a.id}',this)">
+  <span class="spacer"></span><button class="small" onclick="delAsset('${a.id}','${esc(a.name)}')">删除</button></div></div>`;
+}
+function confirmImageCost(){const m=S.p.settings.image_model; return !isLive(m) || confirm(`图像模型 ${m} 会真实扣费，继续？`)}
+async function genImages(btn){if(confirmImageCost()) await act(btn,()=>api('POST',`/projects/${S.pid}/assets/images`),'参考图已生成')}
+async function genOne(id, btn){if(confirmImageCost()) await act(btn,()=>api('POST',`/assets/${id}/image`),'已出新版本')}
+async function addAsset(btn){const name=document.getElementById('newAsset').value.trim(); if(!name) return;
+  await act(btn,()=>api('POST',`/projects/${S.pid}/assets`,{kind:document.getElementById('newKind').value,name}),'已添加')}
+async function editAsset(id, rev, fields){await act(null,()=>api('PATCH','/assets/'+id,{fields,expected_rev:rev}),'已保存')}
+async function selVer(id, v){await act(null,()=>api('POST',`/assets/${id}/select?version=${v}`),'已切换到 v'+v)}
+async function delAsset(id, name){if(confirm('删除资产 '+name+'？')) await act(null,()=>api('DELETE','/assets/'+id),'已删除')}
+async function upload(id, input){const f=input.files[0]; if(!f) return;
+  await act(null,()=>api('POST',`/assets/${id}/upload?filename=${encodeURIComponent(f.name)}`,undefined,f),'已上传')}
+
+// ---------------- 分镜与提示词 ----------------
+function tabBoard(){
+  const p = S.p;
+  const eps = p.episodes.map(e=>({e, shots:p.shots.filter(s=>s.episode_id===e.id)}));
+  return `<div class="card row"><button class="primary" onclick="act(this,()=>api('POST','/projects/${S.pid}/storyboard'),'分镜已生成')">生成分镜（缺的集）</button>
+  <button onclick="if(confirm('重新生成会覆盖现有分镜与视频记录，确定？'))act(this,()=>api('POST','/projects/${S.pid}/storyboard?force=true'),'分镜已重做')">全部重做分镜</button>
+  <button onclick="if(confirmImageCost())act(this,()=>api('POST','/projects/${S.pid}/frames',{}),'分镜图已生成')">生成分镜图</button>
+  <button onclick="act(this,()=>api('POST','/projects/${S.pid}/prompts'),'提示词已生成')">生成提示词（缺的）</button>
+  <button onclick="if(confirm('会覆盖所有提示词（包括手改过的），确定？'))act(this,()=>api('POST','/projects/${S.pid}/prompts?force=true'),'提示词已重做')">全部重做提示词</button>
+  <button onclick="act(this,()=>api('POST','/projects/${S.pid}/references/resolve'),'引用已重新解析')">重新解析 @引用</button></div>
+  ${eps.map(({e,shots})=>`<div class="card"><div class="ep-title">${esc(e.title)} · ${shots.length} 镜</div>
+  ${shots.length?`<div class="tablewrap"><table><tr><th>#</th><th>分镜图</th><th>镜头</th><th style="width:44%">提示词（用 @资产名 挂参考图）</th></tr>${shots.map(shotRow).join('')}</table></div>`:'<div class="muted">还没有分镜</div>'}</div>`).join('') || '<div class="empty">先在“剧本”里分集</div>'}`;
+}
+function shotRow(s){
+  const pr = s.prompt;
+  const f = (k, rows=1) => rows>1
+    ? `<textarea rows="${rows}" onchange="editShot('${s.id}',${s.rev},'${k}',this.value)">${esc(s[k])}</textarea>`
+    : `<input value="${esc(s[k])}" onchange="editShot('${s.id}',${s.rev},'${k}',this.value)">`;
+  return `<tr><td>${s.shot_no}<div class="muted">${s.duration_s}s</div></td>
+  <td>${s.frame?`<img class="shot-frame" src="${esc(s.frame)}">`:'<div class="shot-frame"></div>'}</td>
+  <td style="min-width:240px"><div class="row" style="gap:4px">${s.scene_asset?`<span class="chip">@${esc(s.scene_asset)}</span>`:''}${s.characters.map(c=>`<span class="chip">@${esc(c)}</span>`).join('')}</div>
+  <div class="muted" style="margin:4px 0">${esc(s.size)} · ${esc(s.angle)} · ${esc(s.movement)}</div>
+  ${f('picture',3)}<div class="muted" style="margin-top:4px">站位</div>${f('blocking',2)}
+  <div class="muted" style="margin-top:4px">台词</div>${f('dialogue',2)}
+  <div class="row" style="margin-top:4px"><span class="muted">时长</span><input type="number" min="1" max="30" style="width:80px" value="${s.duration_s}" onchange="editShot('${s.id}',${s.rev},'duration_s',this.value)">${badge(s.status)}</div></td>
+  <td style="min-width:260px">${pr?`<textarea rows="9" onchange="editPrompt('${pr.id}',${pr.rev},this.value)">${esc(pr.positive)}</textarea>
+  <div style="margin-top:4px">${pr.bindings.map(b=>`<span class="chip" title="${esc(KIND[b.kind]||b.kind)}">${esc(b.mention)} → v${b.version}</span>`).join('')}
+  ${pr.unresolved.map(u=>`<span class="chip bad" title="资产表里没有这个名字">@${esc(u)} 未找到</span>`).join('')}
+  ${pr.stale.map(b=>`<span class="chip warn" title="资产换过图，提交时会自动用最新版本">${esc(b.name)} 已更新</span>`).join('')}</div>
+  <div class="row" style="margin-top:4px"><button class="small" onclick="act(this,()=>api('POST','/projects/${S.pid}/prompts',{shot_ids:['${s.id}']}),'已重写')">AI 重写本镜</button></div>`
+  :'<span class="muted">还没有提示词</span>'}</td></tr>`;
+}
+async function editShot(id, rev, k, v){await act(null,()=>api('PATCH','/shots/'+id,{fields:{[k]:v},expected_rev:rev}),'已保存')}
+async function editPrompt(id, rev, v){await act(null,()=>api('PATCH','/prompts/'+id,{fields:{positive:v},expected_rev:rev}),'已保存')}
+function showConflict(err){
+  const d = err.detail||{}; const m = document.createElement('div'); m.className='modal';
+  m.innerHTML = `<div class="card"><b>保存冲突</b><p class="muted">${esc(err.message)}。页面已刷新为最新内容，你的草稿在下面，需要的话复制回去再保存。</p>
+  ${(d.conflict_fields||[]).map(f=>`<div style="margin:8px 0"><b>${esc(f)}</b><div class="kv"><span class="muted">最新内容</span><pre>${esc(JSON.stringify(d.current[f]))}</pre>
+  <span class="muted">你的草稿</span><pre>${esc(JSON.stringify(d.yours[f]))}</pre></div></div>`).join('')}
+  <div class="row" style="justify-content:flex-end"><button class="primary" onclick="this.closest('.modal').remove()">知道了</button></div></div>`;
+  document.body.appendChild(m);
+}
+
+// ---------------- 视频 ----------------
+function tabVideos(){
+  const p = S.p, st = p.settings;
+  return `<div class="card row"><span>模型 <b>${esc(st.video_model)}</b> ${isLive(st.video_model)?'<span class="badge live">真实扣费</span>':'<span class="badge">模拟</span>'}
+  · ${esc(st.resolution)} · ${esc(MODE[st.video_mode])}</span><span class="spacer"></span>
+  <button onclick="quote(this)">报价</button><button class="primary" onclick="submitAll(this)">提交全部未出片镜头</button>
+  <button onclick="act(this,()=>api('POST','/projects/${S.pid}/videos/poll'),'已刷新回执')">刷新回执</button></div>
+  <div id="quoteBox"></div>
+  ${p.episodes.map(e=>{const shots=p.shots.filter(s=>s.episode_id===e.id); return `<div class="card"><div class="ep-title">${esc(e.title)}</div>
+  ${shots.length?`<div class="grid">${shots.map(videoCard).join('')}</div>`:'<div class="muted">没有镜头</div>'}</div>`}).join('') || '<div class="empty">先做分镜和提示词</div>'}`;
+}
+function videoCard(s){
+  const j = s.job;
+  return `<div class="card" style="margin:0"><div class="row"><b>镜头 ${s.shot_no}</b>${badge(s.status)}<span class="spacer"></span><span class="muted">${s.duration_s}s</span></div>
+  ${j&&j.play_url?`<video controls preload="metadata" src="${esc(j.play_url)}" style="margin-top:6px"></video>`:(s.frame?`<img class="thumb" style="margin-top:6px" src="${esc(s.frame)}">`:'')}
+  ${j&&j.error?`<div class="err">${esc(j.error)}</div>`:''}
+  <div style="margin-top:6px">${s.jobs.map(x=>`<span class="chip ${x.id===s.selected_job_id?'':'warn'}" style="cursor:pointer" title="${esc(MODE[x.mode]||x.mode)} · ${esc(STATUS[x.status]||x.status)} · ¥${(x.charged_rmb||x.quoted_rmb).toFixed(2)}"
+    onclick="${x.status==='succeeded'?`act(null,()=>api('POST','/shots/${s.id}/select?job_id=${x.id}'),'已选用 v${x.version}')`:''}">v${x.version} ${esc(STATUS[x.status]||x.status)}${x.id===s.selected_job_id?' ✓':''}</span>`).join('')}</div>
+  <div class="row" style="margin-top:6px"><select style="width:auto" id="mode_${s.id}">${Object.entries(MODE).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>
+  <button class="small" onclick="redo('${s.id}',this)">${s.jobs.length?'重做':'出片'}</button>
+  ${s.jobs.filter(x=>x.status==='submitted'||x.status==='running').map(x=>`<button class="small" onclick="act(this,()=>api('POST','/jobs/${x.id}/cancel'),'已取消')">取消 v${x.version}</button>`).join('')}</div></div>`;
+}
+async function quote(btn){
+  try{btn.disabled=true; const q = await api('POST',`/projects/${S.pid}/videos/quote`,{});
+    document.getElementById('quoteBox').innerHTML = `<div class="card"><b>本次报价</b>：${q.items.length} 个镜头，约 ¥${q.total_rmb.toFixed(2)}
+    （${q.live?'<span class="badge live">真实扣费</span>':'模拟，不花钱'}）。剩余预算 ¥${q.remaining_rmb.toFixed(2)}。
+    ${q.within_budget?'<span class="badge ok">在预算内</span>':'<span class="badge bad">超出预算</span>'}
+    ${q.skipped.length?`<div class="muted">跳过 ${q.skipped.length} 个：${q.skipped.map(x=>'#'+x.shot_no+' '+esc(x.reason)).join('；')}</div>`:''}</div>`;
+  }catch(e){toast(e.message,true)}finally{btn.disabled=false}
+}
+async function submitAll(btn){
+  if (isLive(S.p.settings.video_model) && !confirm('当前视频模型会真实扣费，确定提交？')) return;
+  await act(btn,()=>api('POST',`/projects/${S.pid}/videos`,{}),'已提交');
+}
+async function redo(sid, btn){
+  if (isLive(S.p.settings.video_model) && !confirm('当前视频模型会真实扣费，确定提交这个镜头？')) return;
+  const mode = document.getElementById('mode_'+sid).value;
+  await act(btn,()=>api('POST',`/projects/${S.pid}/videos`,{shot_ids:[sid],mode}),'已提交');
+}
+
+// ---------------- 成片 ----------------
+function tabFinal(){
+  const p = S.p;
+  return `<div class="card row"><button class="primary" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble'),'已合成')">合成全部剧集</button>
+  <button onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?allow_partial=true'),'已合成（跳过缺的镜头）')">跳过缺镜头合成</button>
+  <span class="muted">按每个镜头当前选用的版本拼接；字幕取自台词。烧录字幕在“设置”里开。</span></div>
+  ${p.episodes.map(e=>`<div class="card"><div class="row"><b>${esc(e.title)}</b>${e.final_url?`<span class="badge ok">${e.final_seconds.toFixed(1)} 秒</span>`:'<span class="badge">未合成</span>'}
+  <span class="spacer"></span><button class="small" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?episode_no=${e.no}'),'已合成')">合成本集</button></div>
+  ${e.final_url?`<video controls src="${esc(e.final_url)}" style="margin-top:8px;max-width:360px"></video>
+  <div class="row" style="margin-top:6px"><a href="${esc(e.final_url)}" download>下载视频</a><a href="${esc(e.srt_url)}" download>下载字幕</a></div>`:''}</div>`).join('') || '<div class="empty">还没分集</div>'}`;
+}
+
+// ---------------- 设置 ----------------
+function opt(list, cur){
+  const ids = list.map(m=>m.id); if (cur && !ids.includes(cur)) list = [{id:cur}, ...list];
+  return list.map(m=>`<option value="${esc(m.id)}" ${m.id===cur?'selected':''}>${esc(m.id)}${m.live?'（真实）':'（模拟）'}</option>`).join('')}
+function tabSettings(){
+  const st = S.p.settings, M = S.models;
+  const by = t => M.filter(m=>m.type===t);
+  const vm = M.find(m=>m.id===st.video_model) || {specs:[]};
+  const tog = (k,label) => `<span>${label}</span><select data-k="${k}"><option value="true" ${st[k]?'selected':''}>开</option><option value="false" ${!st[k]?'selected':''}>关</option></select>`;
+  return `<div class="card"><div class="kv">
+  <span>项目名</span><input data-k="name" value="${esc(S.p.name)}">
+  <span>画风</span><input data-k="style" value="${esc(S.p.style)}" placeholder="真人 / 国漫 / 3D 动画 …">
+  <span>画幅</span><select data-k="aspect_ratio">${['9:16','16:9','1:1'].map(a=>`<option ${a===st.aspect_ratio?'selected':''}>${a}</option>`).join('')}</select>
+  <span>文本模型</span><select data-k="text_model">${opt(by('chat'), st.text_model)}</select>
+  <span>图像模型</span><select data-k="image_model">${opt(by('image'), st.image_model)}</select>
+  <span>视频模型</span><select data-k="video_model">${opt(by('video'), st.video_model)}</select>
+  <span>分辨率</span><select data-k="resolution">${(vm.specs&&vm.specs.length?vm.specs:['480P','720P','1080P']).map(r=>`<option ${r===st.resolution?'selected':''}>${r}</option>`).join('')}</select>
+  <span>出片方式</span><select data-k="video_mode">${Object.entries(MODE).map(([k,v])=>`<option value="${k}" ${k===st.video_mode?'selected':''}>${v}</option>`).join('')}</select>
+  <span>每集最多镜头</span><input data-k="max_shots" type="number" min="1" max="40" value="${st.max_shots}">
+  <span>项目预算（元）</span><input data-k="budget_rmb" type="number" min="0" step="1" value="${st.budget_rmb}">
+  ${tog('gen_asset_images','一键时给资产出图')}${tog('gen_frames','一键时生成分镜图')}${tog('auto_assemble','一键最后自动合成')}${tog('burn_subtitles','字幕烧进画面')}
+  </div><div class="row" style="margin-top:12px"><button class="primary" onclick="saveSettings(this)">保存设置</button>
+  <span class="muted">标“真实”的模型会真实调用并扣费；“模拟”零成本，用来走通流程。</span>
+  <span class="spacer"></span><button onclick="delProject(this)">删除项目</button></div></div>`;
+}
+async function saveSettings(btn){
+  const body = {};
+  document.querySelectorAll('#tabBody [data-k]').forEach(el=>{const k=el.dataset.k; let v=el.value;
+    if (v==='true'||v==='false') v = v==='true'; else if (el.type==='number') v = Number(v); body[k]=v});
+  await act(btn,()=>api('PATCH',`/projects/${S.pid}/settings`,body),'设置已保存');
+}
+async function delProject(btn){
+  if (!confirm('删除整个项目（含所有记录）？本地素材文件不会删。')) return;
+  try{await api('DELETE','/projects/'+S.pid); S.pid=null; location.hash=''; toast('已删除'); await load()}catch(e){toast(e.message,true)}
+}
+
+// ---------------- 启动 ----------------
+(async function boot(){
+  try{
+    const h = await api('GET','/healthz');
+    document.getElementById('health').innerHTML = `聚合层 ${h.aggregator?'<span class="badge ok">在线</span>':'<span class="badge bad">离线</span>'}
+      · ffmpeg ${h.ffmpeg?'✓':'✗'}<br>真实模型：${h.live_models.length?h.live_models.map(esc).join('、'):'无（全部模拟）'}`;
+    if (h.aggregator) S.models = (await api('GET','/api/models')).items;
+  }catch(e){toast('后端连不上：'+e.message, true)}
+  S.pid = location.hash.slice(1) || null;
+  await load();
+})();
+</script>
+</body>
+</html>
