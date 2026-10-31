@@ -251,6 +251,19 @@ class AssetsMixin:
         return await self._new_version(a, f, prompt, [self._ref_url(f["local_path"], f["image_url"])], "edited",
                                        image_size("16:9", st["image_resolution"]))
 
+    async def upscale_form(self, fid: str) -> dict:
+        """4K 高清：以当前图为参考重出 4K 版本（新版本，原图保留在历史里）。"""
+        a, f = self._form(fid)
+        if a["kind"] == "audio":
+            raise WorkflowError("音频资产不能放大")
+        if not f["current_version"]:
+            raise WorkflowError("这个形态还没有图")
+        p = self._project_row(a["project_id"])
+        prompt = (f"{p['style']}风格，{a['name']}{'' if f['is_default'] else '（' + f['name'] + '形态）'}高清放大："
+                  f"严格保持参考图的构图、人物身份、服装、配色和所有细节不变，只提升清晰度与纹理细节到 4K，无文字无水印。")
+        return await self._new_version(a, f, prompt, [self._ref_url(f["local_path"], f["image_url"])], "upscaled",
+                                       image_size("16:9", "4K"))
+
     async def gen_asset_images(self, pid: str, only_missing: bool = True, kinds: list[str] | None = None) -> dict:
         with db.tx() as c:
             assets = self._assets(c, pid)

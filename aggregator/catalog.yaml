@@ -29,27 +29,28 @@ models:
   - id: seedream-5.0-flash
     type: image
     unit: image
-    price: { rmb_per_image: 0.2 }      # 估算，以火山账单为准
-    cost: { rmb_per_image: 0.2 }
+    price: { rmb_per_image: 0.12 }     # 官方价 0.12 元/张（2026-10）
+    cost: { rmb_per_image: 0.12 }
     routes:
       - { provider: volcengine_official, api_id: doubao-seedream-5-0-flash-260915, weight: 1 }
 
   - id: seedream-5.0-pro
     type: image
     unit: image
-    price: { rmb_per_image: 0.3 }
-    cost: { rmb_per_image: 0.3 }
+    price: { rmb_per_image: 0.6 }      # 官方价：≤261 万像素 0.30 元/张，>261 万像素 0.60 元/张（2K 横图 369 万像素）
+    cost: { rmb_per_image: 0.6 }
     routes:
       - { provider: volcengine_official, api_id: doubao-seedream-5-0-pro-260628, weight: 1 }
 
   # ---- 火山方舟 · 视频（2026-10-31：全部“未开通”，需在火山方舟控制台 → 开通管理 里开通后才能用）----
-  # 价格按刀徒同规格的售价估算（偏保守，用来卡预算），以火山账单为准。
+  # 价格 = 火山官方 token 单价 × 每秒 token（tokens = 时长×宽×高×24/1024：480P≈9600/s，720P≈21600/s，1080P≈48600/s），
+  # 按“不含视频输入”计（文生/图生/全能参考都算这档），2026-10 火山方舟模型价格页。
   - id: ark-seedance-2.0-fast
     type: video
     unit: output_second
-    price: { rmb_per_second: { 480P: 0.40, 720P: 0.90, 1080P: 2.00 } }
-    cost: { rmb_per_second: { 480P: 0.40, 720P: 0.90, 1080P: 2.00 } }
-    specs: [480P, 720P, 1080P]
+    price: { rmb_per_second: { 480P: 0.3552, 720P: 0.7992 } }     # 37 元/百万 token；fast 不支持 1080P
+    cost: { rmb_per_second: { 480P: 0.3552, 720P: 0.7992 } }
+    specs: [480P, 720P]
     duration: { min: 4, max: 15, step: 1 }
     modes: [文生视频, 首帧参考, 全能参考]
     routes:
@@ -58,8 +59,8 @@ models:
   - id: ark-seedance-2.0
     type: video
     unit: output_second
-    price: { rmb_per_second: { 480P: 0.55, 720P: 1.20, 1080P: 2.80 } }
-    cost: { rmb_per_second: { 480P: 0.55, 720P: 1.20, 1080P: 2.80 } }
+    price: { rmb_per_second: { 480P: 0.4416, 720P: 0.9936, 1080P: 2.4786 } }   # 46 / 51 元/百万 token
+    cost: { rmb_per_second: { 480P: 0.4416, 720P: 0.9936, 1080P: 2.4786 } }
     specs: [480P, 720P, 1080P]
     duration: { min: 4, max: 15, step: 1 }
     modes: [文生视频, 首帧参考, 全能参考]
@@ -69,19 +70,30 @@ models:
   - id: ark-seedance-2.5
     type: video
     unit: output_second
-    price: { rmb_per_second: { 480P: 0.80, 720P: 1.75, 1080P: 4.30 } }
-    cost: { rmb_per_second: { 480P: 0.80, 720P: 1.75, 1080P: 4.30 } }
+    price: { rmb_per_second: { 480P: 0.672, 720P: 1.512, 1080P: 3.742 } }    # 70 / 77 元/百万 token
+    cost: { rmb_per_second: { 480P: 0.672, 720P: 1.512, 1080P: 3.742 } }
     specs: [480P, 720P, 1080P]
     duration: { min: 4, max: 15, step: 1 }
     modes: [文生视频, 首帧参考, 全能参考]
     routes:
       - { provider: volcengine_official, api_id: doubao-seedance-2-5-260628, weight: 1 }
 
+  - id: ark-seedance-2.0-mini
+    type: video
+    unit: output_second
+    price: { rmb_per_second: { 480P: 0.2208, 720P: 0.4968 } }     # 23 元/百万 token；不支持 1080P
+    cost: { rmb_per_second: { 480P: 0.2208, 720P: 0.4968 } }
+    specs: [480P, 720P]
+    duration: { min: 4, max: 15, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考]
+    routes:
+      - { provider: volcengine_official, api_id: doubao-seedance-2-0-mini-260615, weight: 1 }
+
   - id: ark-seedance-1.0-pro-fast
     type: video
     unit: output_second
-    price: { rmb_per_second: { 480P: 0.10, 720P: 0.22, 1080P: 0.50 } }
-    cost: { rmb_per_second: { 480P: 0.10, 720P: 0.22, 1080P: 0.50 } }
+    price: { rmb_per_second: { 480P: 0.0403, 720P: 0.0907, 1080P: 0.2041 } }   # 4.2 元/百万 token（老一代，无原生音频、无多图参考）
+    cost: { rmb_per_second: { 480P: 0.0403, 720P: 0.0907, 1080P: 0.2041 } }
     specs: [480P, 720P, 1080P]
     duration: { min: 2, max: 12, step: 1 }
     modes: [文生视频, 首帧参考]
@@ -214,3 +226,15 @@ models:
     modes: [视频编辑]
     routes:
       - { provider: mengyu_video, api_id: omni-flash-video-edit, spec: 720P, weight: 1 }
+
+  - id: wan-2.2-motion-transfer
+    type: video_edit
+    unit: output_second
+    price: { rmb_per_second: { 480P: 0.50, 720P: 1.00 } }
+    cost: { rmb_per_second: { 480P: 0.40, 720P: 0.80 } }
+    specs: [480P, 720P]
+    duration: { min: 1, max: 30, step: 1 }
+    modes: [动作迁移]
+    routes:
+      - { provider: mengyu_video, api_id: wan2.2-animate-move, spec: 480P, weight: 1 }
+      - { provider: mengyu_video, api_id: wan2.2-animate-move, spec: 720P, weight: 1 }

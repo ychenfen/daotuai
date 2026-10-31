@@ -240,6 +240,150 @@ class VideoMixin:
             raise Conflict("参考素材已变化。" + "；".join(parts) + "。确认后会按当前版本提交。",
                            {"code": "reference_changed", **problems})
 
+    # ------------------------------------------------------------------
+    # 视频工具：视频编辑（改已有成片）/ 动作迁移（角色图 + 参考动作视频）。结果都是该镜头的新版本。
+    # ------------------------------------------------------------------
+
+    TOOL_MODES = {"video_edit": "视频编辑", "motion_transfer": "动作迁移"}
+
+    def _video_source(self, proj: dict, s: dict, source_job_id: str | None, source_material_id: str | None) -> dict:
+        if source_material_id:
+            mat = next((x for x in proj["materials"] if x["id"] == source_material_id), None)
+            if not mat or mat["media_type"] != "video":
+                raise WorkflowError("选的本地素材不是视频")
+            return {"path": mat["local_path"], "url": "", "label": f"素材 {mat['name']}", "material_id": mat["id"]}
+        jobs = [j for x in proj["shots"] for j in x["jobs"]]
+        j = next((x for x in jobs if x["id"] == source_job_id), None) if source_job_id else s["job"]
+        if not j or j["status"] != "succeeded":
+            raise WorkflowError("没有可用的源视频：先给这个镜头出片，或上传一段视频素材")
+        return {"path": j["local_path"], "url": j["url"], "label": f"v{j['version']}", "job_id": j["id"],
+                "seconds": j["seconds"]}
+
+    @staticmethod
+    def _video_ref(src: dict) -> str:
+        if src.get("url") and media.is_mock_url(src["url"]):
+            return src["url"]
+        if src.get("path") and os.path.exists(src["path"]):
+            if os.path.getsize(src["path"]) > 20 * 1024 * 1024:
+                if src.get("url"):
+                    return src["url"]
+                raise WorkflowError("源视频超过 20 MB，无法直接上传给模型；请先压缩或剪短")
+            return media.data_uri(src["path"])
+        if src.get("url"):
+            return src["url"]
+        raise WorkflowError("源视频文件不见了")
+
+    async def submit_tool(self, pid: str, shot_id: str, tool: str, instruction: str = "", model: str | None = None,
+                          resolution: str | None = None, source_job_id: str | None = None,
+                          source_material_id: str | None = None, form_id: str | None = None) -> dict:
+        if tool not in self.TOOL_MODES:
+            raise WorkflowError("tool 只能是 video_edit / motion_transfer")
+        proj = self.get(pid)
+        s = next((x for x in proj["shots"] if x["id"] == shot_id), None)
+        if not s:
+            raise NotFound("镜头不存在")
+        want = self.TOOL_MODES[tool]
+        if not model:
+            m = next((x for x in await self.agg.models() if want in (x.get("modes") or [])), None)
+            if not m:
+                raise WorkflowError(f"模型目录里没有支持「{want}」的模型")
+            model = m["id"]
+        m = await self.model_info(model)
+        if want not in (m.get("modes") or []):
+            raise WorkflowError(f"{model} 不支持「{want}」")
+        res = (resolution or (m.get("specs") or ["720P"])[0]).upper()
+        if m.get("specs") and res not in m["specs"]:
+            res = m["specs"][0]
+        src = self._video_source(proj, s, source_job_id, source_material_id)
+        info = media.probe(src["path"]) if src.get("path") and os.path.exists(src["path"]) else {}
+        seconds = self._clamp_duration(info.get("duration") or src.get("seconds") or s["duration_s"], m)
+        images, record = [], [{"source": src["label"], "job_id": src.get("job_id"), "material_id": src.get("material_id")}]
+        if tool == "motion_transfer":
+            forms = {f["id"]: (a, f) for a in proj["assets"] for f in a["forms"]}
+            if not form_id or form_id not in forms:
+                raise WorkflowError("动作迁移要选一个角色形态（用它的图来演参考视频里的动作）")
+            a, f = forms[form_id]
+            if not (f["local_path"] or f["image_url"]):
+                raise WorkflowError(f"{a['name']}（{f['name']}）还没有图")
+            images.append({"url": self._ref_url(f["local_path"], f["image_url"]), "role": "reference_image"})
+            record.append({"asset_id": a["id"], "form_id": f["id"], "name": a["name"], "form": f["name"],
+                           "version": f["current_version"], "role": "reference_image"})
+            prompt = f"让参考图中的{a['name']}按参考视频的动作与镜头运动表演，保持人物外观一致。{instruction or ''}".strip()
+        else:
+            if not (instruction or "").strip():
+                raise WorkflowError("视频编辑要写修改要求，比如“把背景换成雨夜”")
+            prompt = instruction.strip()
+        q = await self.agg.quote(model, spec=res, seconds=seconds)
+        spend = self._spend(pid)
+        if q["rmb"] > spend["remaining_rmb"] + 1e-9:
+            raise BudgetExceeded(f"超出项目预算：本次约 ¥{q['rmb']:.2f}，剩余 ¥{spend['remaining_rmb']:.2f}",
+                                 {"total_rmb": q["rmb"], **spend})
+        video_ref = self._video_ref(src)
+        version = (max((j["version"] for j in s["jobs"]), default=0)) + 1
+        crid = short_hash(s["id"], version, tool, model, res, prompt, src["label"], form_id)
+        r = await self.agg.submit_video(model, prompt, res, seconds, proj["settings"]["aspect_ratio"],
+                                        images or None, idem=crid, video=video_ref)
+        jid = new_id("job")
+        with db.tx() as c:
+            c.execute("""INSERT INTO jobs(id,shot_id,version,client_request_id,agg_task_id,model,resolution,aspect_ratio,
+                         duration_s,mode,refs_json,prompt_snapshot,status,quoted_rmb,created_at,updated_at)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (jid, s["id"], version, crid, r["id"], model, res, proj["settings"]["aspect_ratio"], seconds,
+                       tool, db.dump(record), prompt, "submitted",
+                       float((r.get("billing") or {}).get("quoted_rmb") or q["rmb"]), db.now(), db.now()))
+            c.execute("UPDATE shots SET status='video_submitted' WHERE id=?", (s["id"],))
+        self.refresh_status(pid)
+        self.notify(pid, "info", f"已提交{want}：镜头 {s['code']}", f"{model} · {res} · 源 {src['label']}")
+        return {"job": jid, "version": version, "mode": tool, "model": model, "resolution": res,
+                "seconds": seconds, "quoted_rmb": q["rmb"], "source": src["label"]}
+
+    # ------------------------------------------------------------------
+    # 剪辑工程导出：编号片段 + SRT + EDL + FCPXML（Premiere / 达芬奇 / Final Cut 可直接导入；剪映拖入片段与字幕）
+    # ------------------------------------------------------------------
+
+    def build_edit_package(self, pid: str, episode_no: int | None = None) -> tuple[str, str]:
+        proj = self.get(pid)
+        aspect = proj["settings"]["aspect_ratio"]
+        w, h = media.aspect_size(aspect, 720)
+        fd, tmp = tempfile.mkstemp(suffix=".zip", prefix="edit_")
+        os.close(fd)
+        n_eps = 0
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
+            for ep in proj["episodes"]:
+                if episode_no is not None and ep["no"] != episode_no:
+                    continue
+                clips = []
+                for s in [x for x in proj["shots"] if x["episode_id"] == ep["id"]]:
+                    j = s["job"] if s["job"] and s["job"]["status"] == "succeeded" else None
+                    if not (j and j["local_path"] and os.path.exists(j["local_path"])):
+                        continue
+                    secs = (media.probe(j["local_path"]).get("duration") or j["seconds"] or s["duration_s"])
+                    name = f"{len(clips) + 1:02d}_{s['code']}_v{j['version']}.mp4"
+                    clips.append({"name": name, "path": j["local_path"], "seconds": float(secs),
+                                  "dialogue": self._subtitle_text(s["dialogue"]), "code": s["code"]})
+                if not clips:
+                    continue
+                n_eps += 1
+                base = f"第{ep['no']}集"
+                for c_ in clips:
+                    z.write(c_["path"], f"{base}/片段/{c_['name']}")
+                t, subs = 0.0, []
+                for c_ in clips:
+                    if c_["dialogue"]:
+                        subs.append((t + 0.1, t + c_["seconds"] - 0.1, c_["dialogue"]))
+                    t += c_["seconds"]
+                z.writestr(f"{base}/字幕.srt", media.build_srt(subs))
+                z.writestr(f"{base}/时间线.edl", media.build_edl(f"EP{ep['no']:02d}", clips))
+                z.writestr(f"{base}/时间线.fcpxml", media.build_fcpxml(f"EP{ep['no']:02d}", clips, w, h, "片段"))
+            if not n_eps:
+                raise WorkflowError("没有已出片的镜头可导出")
+            z.writestr("导入说明.txt", (
+                "每集一个文件夹：片段/ 按镜头顺序编号，字幕.srt 是台词字幕。\n"
+                "Premiere / 达芬奇：导入 时间线.edl 或 时间线.fcpxml，提示找不到媒体时把路径指向“片段”文件夹。\n"
+                "Final Cut Pro：文件 → 导入 → XML，选 时间线.fcpxml。\n"
+                "剪映：新建草稿，把“片段”里的文件全选拖进时间线（文件名已按顺序编号），再 文本 → 本地字幕 导入 字幕.srt。\n"))
+        return tmp, f"{proj['name']}-剪辑工程.zip"
+
     async def poll_videos(self, pid: str | None = None) -> dict:
         """推进所有在跑的视频任务（pid=None 时跨项目）。成功即下载到本地、抽封面，并设为该镜头的选用版本。
         后台轮询器和一键任务可能同时调用，这里串行化，避免同一任务被结算/下载两次。"""

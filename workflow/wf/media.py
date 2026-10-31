@@ -196,6 +196,56 @@ def build_srt(items: list[tuple[float, float, str]]) -> str:
     return "\n".join(out)
 
 
+# ---------------- 剪辑时间线（EDL / FCPXML） ----------------
+
+FPS = 24
+
+
+def _tc(seconds: float, fps: int = FPS) -> str:
+    f = int(round(seconds * fps))
+    hh, f = divmod(f, 3600 * fps)
+    mm, f = divmod(f, 60 * fps)
+    ss, ff = divmod(f, fps)
+    return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+
+
+def build_edl(title: str, clips: list[dict], fps: int = FPS) -> str:
+    """CMX3600 EDL：每个片段一条事件，视频+音频，源从 0 开始。"""
+    out = [f"TITLE: {title}", "FCM: NON-DROP FRAME", ""]
+    t = 0.0
+    for i, c in enumerate(clips, start=1):
+        d = c["seconds"]
+        out.append(f"{i:03d}  AX       AA/V  C        {_tc(0, fps)} {_tc(d, fps)} {_tc(t, fps)} {_tc(t + d, fps)}")
+        out.append(f"* FROM CLIP NAME: {c['name']}")
+        out.append("")
+        t += d
+    return "\n".join(out)
+
+
+def build_fcpxml(title: str, clips: list[dict], w: int, h: int, folder: str, fps: int = FPS) -> str:
+    from xml.sax.saxutils import quoteattr
+
+    def r(seconds: float) -> str:
+        return f"{int(round(seconds * fps))}/{fps}s"
+
+    assets, spine, t = [], [], 0.0
+    for i, c in enumerate(clips, start=1):
+        stem = os.path.splitext(c["name"])[0]
+        src = quoteattr(f"./{folder}/{c['name']}")
+        dur = r(c["seconds"])
+        assets.append(f'    <asset id="a{i}" name={quoteattr(stem)} start="0s" duration="{dur}" hasVideo="1" '
+                      f'hasAudio="1" format="r1"><media-rep kind="original-media" src={src}/></asset>')
+        spine.append(f'          <asset-clip ref="a{i}" offset="{r(t)}" name={quoteattr(stem)} duration="{dur}" start="0s"/>')
+        t += c["seconds"]
+    return "\n".join([
+        '<?xml version="1.0" encoding="UTF-8"?>', "<!DOCTYPE fcpxml>", '<fcpxml version="1.10">', "  <resources>",
+        f'    <format id="r1" name="FFVideoFormat{w}x{h}p{fps}" frameDuration="1/{fps}s" width="{w}" height="{h}"/>',
+        *assets, "  </resources>", "  <library>", f"    <event name={quoteattr(title)}>",
+        f"      <project name={quoteattr(title)}>",
+        f'        <sequence format="r1" duration="{r(t)}" tcStart="0s" tcFormat="NDF">', "          <spine>",
+        *spine, "          </spine>", "        </sequence>", "      </project>", "    </event>", "  </library>", "</fcpxml>"])
+
+
 # ---------------- 拼接成片 ----------------
 
 def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str, burn: bool) -> dict:

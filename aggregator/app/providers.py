@@ -213,6 +213,8 @@ async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict
         content: list[dict] = [{"type": "text", "text": payload.get("prompt", "")}]
         for img in images:
             content.append({"type": "image_url", "image_url": {"url": img["url"]}, "role": img["role"]})
+        if payload.get("video"):
+            content.append({"type": "video_url", "video_url": {"url": payload["video"]}, "role": "reference_video"})
         body = {
             "model": api_id,
             "content": content,
@@ -232,6 +234,8 @@ async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict
         if images:
             body["images"] = [i["url"] for i in images]
             body["image"] = images[0]["url"]
+        if payload.get("video"):
+            body["video"] = payload["video"]
         data = await _post(provider, "/videos/generations", body)
     task_id = data.get("id") or data.get("task_id")
     if not task_id:

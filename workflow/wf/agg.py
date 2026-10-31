@@ -104,11 +104,13 @@ class Agg:
 
     async def submit_video(self, model: str, prompt: str, resolution: str, duration_s: float,
                            aspect_ratio: str = "9:16", images: list[dict] | None = None,
-                           idem: str | None = None) -> dict:
+                           idem: str | None = None, video: str | None = None) -> dict:
         body = {"model": model, "prompt": prompt, "resolution": resolution,
                 "duration": duration_s, "aspect_ratio": aspect_ratio}
         if images:
             body["images"] = images
+        if video:
+            body["video"] = video
         return await self._post("/v1/videos/generations", "video submit", body, idem)
 
     async def poll_video(self, task_id: str) -> dict:

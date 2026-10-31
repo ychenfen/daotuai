@@ -217,6 +217,12 @@ def download(pid: str, background: BackgroundTasks, what: str = "videos", episod
     return _download(path, name, background)
 
 
+@app.get("/projects/{pid}/edit-package")
+def edit_package(pid: str, background: BackgroundTasks, episode_no: int | None = None):
+    path, name = wf().build_edit_package(pid, episode_no)
+    return _download(path, name, background)
+
+
 @app.patch("/projects/{pid}/settings")
 def update_settings(pid: str, body: dict = Body(...)):
     return wf().update_settings(pid, body)
@@ -336,6 +342,11 @@ async def form_image(fid: str):
 @app.post("/forms/{fid}/edit-image")
 async def form_edit_image(fid: str, body: dict = Body(...)):
     return await wf().edit_form_image(fid, body.get("instruction", ""))
+
+
+@app.post("/forms/{fid}/upscale")
+async def form_upscale(fid: str):
+    return await wf().upscale_form(fid)
 
 
 @app.post("/forms/{fid}/upload")
@@ -458,6 +469,14 @@ async def videos(pid: str, force: bool = False, resolution: str | None = None,
                                     accept_stale=bool(body.get("accept_stale")),
                                     allow_missing=bool(body.get("allow_missing")),
                                     **_video_args(body, force, resolution))
+
+
+@app.post("/projects/{pid}/videos/tool")
+async def video_tool(pid: str, body: dict = Body(...)):
+    """视频编辑 / 动作迁移：结果是该镜头的新版本。"""
+    return await wf().submit_tool(pid, body.get("shot_id", ""), body.get("tool", ""), body.get("instruction", ""),
+                                  body.get("model"), body.get("resolution"), body.get("source_job_id"),
+                                  body.get("source_material_id"), body.get("form_id"))
 
 
 @app.post("/projects/{pid}/videos/poll")

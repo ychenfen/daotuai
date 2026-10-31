@@ -470,6 +470,59 @@ async def main() -> int:
         check("无剧本一键 400", (await c.post(f"/projects/{nob}/run")).status_code == 400, "")
         check("空项目名 400", (await c.post("/projects", json={"name": " "})).status_code == 400, "")
 
+        print("\n[V] 4K 高清 / 参考一致性闸门 / 相近名提示 / 视频编辑 / 动作迁移 / 剪辑工程")
+        st = await j(await c.get(f"/projects/{pid}"))
+        kx = next(a for a in st["assets"] if a["name"] == "孔宣")
+        before_v = kx["forms"][0]["current_version"]
+        up = await j(await c.post(f"/forms/{kx['forms'][0]['id']}/upscale"))
+        newest = max(v["version"] for v in up["forms"][0]["versions"])
+        check("4K 高清 → 新版本（upscaled，4K 尺寸提示）", up["forms"][0]["current_version"] == newest > before_v
+              and up["forms"][0]["versions"][-1]["source"] in ("upscaled", "mock")
+              and "4K" in up["forms"][0]["versions"][-1]["prompt"], json.dumps(up["forms"][0]["versions"][-1])[:160])
+        ks = next(s for s in st["shots"] if any(b["name"] == "孔宣" and b["form"] == "默认" for b in s["prompt"]["bindings"]))
+        gate = await c.post(f"/projects/{pid}/videos", json={"shot_ids": [ks["id"]]})
+        gb = await j(gate)
+        check("资产换图后提交：409 参考素材已变化（带明细）", gate.status_code == 409
+              and gb["error"]["detail"]["code"] == "reference_changed"
+              and any(x["asset"] == "孔宣" for x in gb["error"]["detail"]["stale"]), json.dumps(gb, ensure_ascii=False)[:300])
+        ok = await j(await c.post(f"/projects/{pid}/videos", json={"shot_ids": [ks["id"]], "accept_stale": True}))
+        check("确认用最新版后提交成功", len(ok["submitted"]) == 1, json.dumps(ok)[:200])
+        await c.post(f"/projects/{pid}/videos/poll")
+        await c.patch(f"/prompts/{ks['prompt']['id']}", json={"fields": {"positive": ks["prompt"]["positive"] + " @孔萱"}})
+        st = await j(await c.get(f"/projects/{pid}"))
+        ks = next(s for s in st["shots"] if s["id"] == ks["id"])
+        check("未解析的 @ 给出相近名提示", "@孔宣" in (ks["prompt"]["suggestions"].get("孔萱") or []),
+              json.dumps(ks["prompt"]["suggestions"], ensure_ascii=False))
+        if HAS_FFMPEG:
+            ve = await c.post(f"/projects/{pid}/videos/tool", json={"shot_id": ks["id"], "tool": "video_edit"})
+            check("视频编辑要写修改要求", ve.status_code == 400, str(ve.status_code))
+            ve = await j(await c.post(f"/projects/{pid}/videos/tool", json={"shot_id": ks["id"], "tool": "video_edit",
+                                                                            "instruction": "把背景换成雨夜"}))
+            check("视频编辑 → 新版本（视频编辑模型）", ve.get("mode") == "video_edit" and ve["model"] == "omni-flash-video-edit",
+                  json.dumps(ve, ensure_ascii=False)[:200])
+            mt = await c.post(f"/projects/{pid}/videos/tool", json={"shot_id": ks["id"], "tool": "motion_transfer"})
+            check("动作迁移要选角色形态", mt.status_code == 400, str(mt.status_code))
+            mt = await j(await c.post(f"/projects/{pid}/videos/tool", json={
+                "shot_id": ks["id"], "tool": "motion_transfer", "form_id": kx["forms"][0]["id"], "instruction": "动作更夸张"}))
+            check("动作迁移 → 新版本（Wan 动作迁移）", mt.get("mode") == "motion_transfer" and "motion" in mt["model"],
+                  json.dumps(mt, ensure_ascii=False)[:200])
+            await c.post(f"/projects/{pid}/videos/poll")
+            st = await j(await c.get(f"/projects/{pid}"))
+            ks = next(s for s in st["shots"] if s["id"] == ks["id"])
+            modes = {x["mode"]: x["status"] for x in ks["jobs"]}
+            check("编辑与迁移都出片成功并保留历史", modes.get("video_edit") == "succeeded"
+                  and modes.get("motion_transfer") == "succeeded" and ks["job"]["mode"] == "motion_transfer", str(modes))
+            ep = await c.get(f"/projects/{pid}/edit-package?episode_no=2")
+            names = zipfile.ZipFile(io.BytesIO(ep.content)).namelist() if ep.status_code == 200 else []
+            check("剪辑工程：片段 + 字幕 + EDL + FCPXML", ep.status_code == 200 and any(n.startswith("第2集/片段/01_2-1") for n in names)
+                  and {"第2集/字幕.srt", "第2集/时间线.edl", "第2集/时间线.fcpxml", "导入说明.txt"} <= set(names), str(names[:8]))
+            z = zipfile.ZipFile(io.BytesIO(ep.content))
+            edl = z.read("第2集/时间线.edl").decode()
+            from xml.etree import ElementTree as ET  # noqa: E402
+            fx = ET.fromstring(z.read("第2集/时间线.fcpxml"))
+            check("EDL / FCPXML 结构正确", "FROM CLIP NAME: 01_2-1" in edl and fx.tag == "fcpxml"
+                  and len(fx.findall(".//asset-clip")) == len([n for n in names if n.startswith("第2集/片段/")]), edl[:120])
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

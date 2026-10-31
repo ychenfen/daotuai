@@ -13,6 +13,8 @@ const STATUS = {draft: '草稿', script_ready: '剧本就绪', parsed: '已解�
   storyboard_ready: '待提示词', prompt_ready: '待出片', video_submitted: '生成中', video_done: '已出片', video_failed: '失败',
   submitted: '已提交', running: '生成中', succeeded: '成功', failed: '失败', cancelled: '已取消', queued: '排队'};
 const MODE = {auto: '自动', reference: '全能参考', first_frame: '首帧参考', text: '文生视频'};
+const JOB_MODE = {...MODE, video_edit: '视频编辑', motion_transfer: '动作迁移'};
+const TOOLS = [['shot', '分镜视频'], ['video_edit', '视频编辑 · Omni Flash'], ['motion_transfer', '动作迁移 · Wan 2.2']];
 
 // ---------------- 工具 ----------------
 const $ = s => document.querySelector(s);
@@ -380,12 +382,17 @@ function assetDetail(aid, fid) {
       ${!f.is_default ? `<div class="small muted" style="margin-top:6px">「${esc(f.name)}」形态描述</div><textarea rows="2" onchange="act(null,()=>api('PATCH','/forms/${f.id}',{fields:{description:this.value},expected_rev:${f.rev}}),'已保存')">${esc(f.description)}</textarea>` : ''}
       <div class="row" style="margin-top:10px">${a.kind !== 'audio' ? `<button class="primary small" onclick="genForm('${f.id}',this)">${f.current_version ? '重新生成' : '生成图片'}</button>` : ''}
         <button class="small" onclick="uploadForm('${f.id}','${a.kind}')">上传${a.kind === 'audio' ? '音频' : '图片'}</button>
+        ${a.kind !== 'audio' && cur ? `<button class="small" onclick="upscale('${f.id}','${a.id}',this)">4K 高清</button>` : ''}
         ${cur ? `<a class="small" href="${esc(cur.display_url)}" download>下载</a>` : ''}
         ${!f.is_default ? `<button class="small danger" onclick="delForm('${f.id}','${a.id}')">删除形态</button>` : ''}</div>
       ${a.kind !== 'audio' && cur ? `<div class="small muted" style="margin-top:10px">编辑图片（在当前图基础上改）</div>
         <div class="row"><input id="editIns" placeholder="把眼睛改成黑色 / 换成战损服装"><button class="small" onclick="editImage('${f.id}','${a.id}',this)">改图</button></div>` : ''}
       <div class="small muted" style="margin-top:10px">适用集数：${a.episodes.map(n => '第' + n + '集').join('、') || '—'} · 在分镜里引用 ${a.usage} 次<br>提示词写法：<code>@${esc(a.name)}${f.is_default ? '' : '（' + esc(f.name) + '形态）'}</code></div></div></div>`);
   m.dataset.asset = aid;
+}
+async function upscale(fid, aid, btn) {
+  if (!confirmCost([S.p.settings.image_model], '4K 高清')) return;
+  const r = await act(btn, () => api('POST', `/forms/${fid}/upscale`), '已生成 4K 版本'); if (r) reopen(aid, fid);
 }
 async function reopen(aid, fid) { await load(); assetDetail(aid, fid); }
 async function editAsset(id, rev, fields) { await act(null, () => api('PATCH', '/assets/' + id, {fields, expected_rev: rev}), '已保存'); }
@@ -519,7 +526,8 @@ function pgPrompts() {
     return `<div class="shot"><div class="hd"><span class="code">${s.code}</span><span class="badge acc">${esc(st.video_model)}</span></div>
       <div class="bd">${p ? `<div class="txt" style="-webkit-line-clamp:5">${esc(p.positive)}</div>
         <div style="margin-top:6px">${p.bindings.map(b => `<span class="chip">${esc(b.mention)} v${b.version}</span>`).join('')}
-        ${p.unresolved.map(u => `<span class="chip bad" title="资产表里没有">@${esc(u)} 未找到</span>`).join('')}
+        ${p.unresolved.map(u => `<span class="chip bad" title="资产表里没有">@${esc(u)} 未找到</span>` + ((p.suggestions || {})[u] || []).map(g =>
+          `<span class="chip click warn" title="点一下替换" onclick="fixMention('${s.id}','${esc(u)}','${esc(g)}')">是不是 ${esc(g)}？</span>`).join('')).join('')}
         ${p.stale.map(b => `<span class="chip warn" title="资产换过图，出片时自动用最新版本">${esc(b.name)} 已更新</span>`).join('')}</div>`
         : '<div class="muted">还没有提示词</div>'}
         <div class="small muted" style="margin-top:6px">负向：${p ? esc(p.negative.slice(0, 40)) : '—'}</div>
@@ -528,6 +536,11 @@ function pgPrompts() {
         ${p ? `<button class="small" onclick="promptModal('${s.id}')">编辑</button>` : ''}
         <button class="small primary" onclick="S.shotId='${s.id}';go('videos')">配置并生成视频</button></div></div>`;
   }).join('')}</div>` : `<div class="empty">${e ? '当前集没有分镜卡片，请先在“分镜”页生成，或点“剧本直转提示词”。' : '先在剧本页解析分集'}</div>`}`;
+}
+async function fixMention(sid, bad, good) {
+  const s = S.p.shots.find(x => x.id === sid), p = s.prompt;
+  const text = p.positive.split('@' + bad).join(good);
+  await act(null, () => api('PATCH', '/prompts/' + p.id, {fields: {positive: text}, expected_rev: p.rev}), `已改为 ${good}`);
 }
 async function genPrompts(btn, engine) {
   const e = curEp(); if (!e) return;
@@ -566,6 +579,16 @@ async function savePrompt(id, rev, btn) {
 }
 
 // ---------------- 视频 ----------------
+async function submitVideos(body) {   // 参考一致性闸门：409 reference_changed → 确认后带上确认标志重发
+  try { return await api('POST', `/projects/${S.pid}/videos`, body); }
+  catch (e) {
+    const d = e.data && e.data.error && e.data.error.detail;
+    if (e.status === 409 && d && d.code === 'reference_changed' && confirm(e.message + '\n\n确定按当前版本提交？')) {
+      return api('POST', `/projects/${S.pid}/videos`, {...body, accept_stale: true, allow_missing: true});
+    }
+    throw e;
+  }
+}
 function vp() {   // 当前镜头的生成参数（页面内暂存）
   const st = S.p.settings;
   const d = S.vp[S.shotId] || (S.vp[S.shotId] = {mode: st.video_mode, model: st.video_model, resolution: st.resolution,
@@ -578,14 +601,18 @@ function pgVideos() {
   const s = shots.find(x => x.id === S.shotId);
   if (!e) return '<div class="empty">先在剧本页解析分集</div>';
   const doneN = shots.filter(x => x.job && x.job.status === 'succeeded').length;
-  const head = `<div class="card"><div class="bar"><b>分镜视频</b>${epSelect('S.ep=+this.value;S.sel.clear();render()')}
+  S.vtool = S.vtool || 'shot';
+  const head = `<div class="tabs">${TOOLS.map(([k, v]) => `<span class="tab ${S.vtool === k ? 'on' : ''}" onclick="S.vtool='${k}';render()">${v}</span>`).join('')}</div>
+  <div class="card"><div class="bar">${epSelect('S.ep=+this.value;S.sel.clear();render()')}
     <span class="badge">${shots.length} 卡片 · ${doneN} 成片 · 已选 ${S.sel.size}</span><span class="spacer"></span>
     <button onclick="addShot(this)">新增卡片</button><button onclick="playAll()" ${doneN ? '' : 'disabled'}>播放全部</button>
     <button onclick="shots_select(true)">全选本集</button><button onclick="shots_select(false)">清除选择</button>
     <button class="primary" onclick="batchGen(this)">批量生成${S.sel.size ? `（${S.sel.size}）` : '（未出片的）'}</button>
     <a href="/projects/${S.pid}/download?what=videos&episode_no=${e.no}"><button ${doneN ? '' : 'disabled'}>批量下载</button></a>
+    <a href="/projects/${S.pid}/edit-package?episode_no=${e.no}"><button ${doneN ? '' : 'disabled'} title="编号片段 + 字幕 + EDL/FCPXML，Premiere/达芬奇/剪映可用">导出剪辑工程</button></a>
     <button onclick="act(this,()=>api('POST','/projects/${S.pid}/videos/poll'),'已刷新回执')">刷新回执</button></div></div>`;
   if (!s) return head + '<div class="empty">本集没有卡片</div>';
+  if (S.vtool !== 'shot') return head + toolPanel(s, shots);
   const P = vp(), m = model(P.model), st = S.p.settings;
   const bound = new Set((s.prompt ? s.prompt.bindings : []).map(b => b.form_id));
   const chosen = P.forms || [...bound];
@@ -620,7 +647,7 @@ function pgVideos() {
         : `<div class="thumb ${S.p.settings.aspect_ratio === '9:16' ? 'tall' : ''} ph small" style="margin-top:8px">${j && (j.status === 'submitted' || j.status === 'running') ? '生成中…' : '选择镜头或历史版本，在此查看成片'}</div>`}
       ${j && j.error ? `<div class="err small">${esc(j.error)}</div>` : ''}</div>
     <div class="card"><h3>历史版本</h3>${s.jobs.slice().reverse().map(x => `<div class="row small" style="padding:6px 0;border-bottom:1px solid var(--line)">
-      <b>v${x.version}</b>${badge(x.status)}<span class="muted">${esc(MODE[x.mode] || x.mode)} · ${esc(x.model)} · ${esc(x.resolution)} · ${x.duration_s}s · ${rmb(x.charged_rmb || x.quoted_rmb)}</span><span class="spacer"></span>
+      <b>v${x.version}</b>${badge(x.status)}<span class="muted">${esc(JOB_MODE[x.mode] || x.mode)} · ${esc(x.model)} · ${esc(x.resolution)} · ${x.duration_s}s · ${rmb(x.charged_rmb || x.quoted_rmb)}</span><span class="spacer"></span>
       ${x.status === 'succeeded' ? (x.id === s.selected_job_id ? '<span class="ok">当前</span>' : `<button class="small" onclick="act(this,()=>api('POST','/shots/${s.id}/select?job_id=${x.id}'),'已选用 v${x.version}')">选用</button>`)
         + `<button class="small" onclick="voiceModal('${x.id}')">截音色</button>${x.play_url ? `<a class="small" href="${esc(x.play_url)}" download>下载</a>` : ''}` : ''}
       ${x.status === 'submitted' || x.status === 'running' ? `<button class="small danger" onclick="act(this,()=>api('POST','/jobs/${x.id}/cancel'),'已取消')">取消</button>` : ''}</div>`).join('') || '<div class="muted small">生成完成后，历史版本会显示在这里。</div>'}</div>
@@ -628,6 +655,35 @@ function pgVideos() {
       <div class="hd"><label onclick="event.stopPropagation()"><input type="checkbox" ${S.sel.has(x.id) ? 'checked' : ''} onchange="this.checked?S.sel.add('${x.id}'):S.sel.delete('${x.id}');render()"></label>
         <b>${x.code}</b><span class="small muted">${x.duration_s}s</span></div>
       <div class="bd">${x.job && x.job.poster_url ? `<img src="${esc(x.job.poster_url)}" class="thumb">` : `<div class="small">${badge(x.status)}</div>`}</div></div>`).join('')}</div></div></div></div>`;
+}
+function toolPanel(s, shots) {
+  const tool = S.vtool, want = tool === 'video_edit' ? '视频编辑' : '动作迁移';
+  const models = S.models.filter(m => (m.modes || []).includes(want));
+  const srcs = S.p.shots.flatMap(x => x.jobs.filter(j => j.status === 'succeeded').map(j => ({id: 'job:' + j.id, label: `镜头 ${x.code} · v${j.version}（${JOB_MODE[j.mode] || j.mode}）`, cur: x.id === s.id && j.id === x.selected_job_id})))
+    .concat(S.p.materials.filter(m => m.media_type === 'video').map(m => ({id: 'mat:' + m.id, label: '本地素材 · ' + m.name})));
+  const forms = S.p.assets.filter(a => ['character', 'creature'].includes(a.kind)).flatMap(a => a.forms.filter(f => f.current_version).map(f => ({id: f.id, label: a.name + (f.is_default ? '' : '（' + f.name + '）'), url: f.display_url})));
+  return `<div class="split2"><div class="card"><h3>${want} · 结果作为镜头 ${s.code} 的新版本</h3>
+    <div class="muted small">${tool === 'video_edit' ? '在已有视频上按要求修改（换背景、改天气、加特效、改服装……），保留原有动作与镜头。' : '用角色图去演参考视频里的动作：参考视频可以是别的镜头成片，也可以上传一段真人表演。'}</div>
+    <div class="kv" style="margin-top:10px">
+      <span>目标镜头</span><select onchange="S.shotId=this.value;render()">${shots.map(x => `<option value="${x.id}" ${x.id === s.id ? 'selected' : ''}>${x.code}</option>`).join('')}</select>
+      <span>${tool === 'video_edit' ? '源视频' : '动作参考视频'}</span><select id="tSrc">${srcs.map(x => `<option value="${x.id}" ${x.cur ? 'selected' : ''}>${esc(x.label)}</option>`).join('') || '<option value="">（还没有成片，先出片或上传视频素材）</option>'}</select>
+      ${tool === 'motion_transfer' ? `<span>角色形态</span><select id="tForm">${forms.map(f => `<option value="${f.id}">${esc(f.label)}</option>`).join('') || '<option value="">（先给角色出图）</option>'}</select>` : ''}
+      <span>模型</span><select id="tModel">${models.map(m => `<option value="${m.id}">${esc(m.id)}${m.live ? '（真实）' : '（模拟）'}</option>`).join('') || '<option value="">（目录里没有支持的模型）</option>'}</select>
+      <span>${tool === 'video_edit' ? '修改要求' : '补充要求（可选）'}</span><textarea id="tIns" rows="4" placeholder="${tool === 'video_edit' ? '把背景换成雨夜霓虹街道，保持人物动作不变' : '动作幅度更大一些'}"></textarea></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end"><button onclick="uploadMaterial(this)">⇧ 上传视频素材</button>
+      <button class="primary" onclick="submitTool(this)">提交${want}</button></div></div>
+  <div class="card"><h3>镜头 ${s.code} 历史版本</h3>${s.jobs.slice().reverse().map(x => `<div class="row small" style="padding:6px 0;border-bottom:1px solid var(--line)"><b>v${x.version}</b>${badge(x.status)}
+    <span class="muted">${esc(JOB_MODE[x.mode] || x.mode)} · ${esc(x.model)}</span><span class="spacer"></span>${x.play_url ? `<a href="${esc(x.play_url)}" target="_blank">播放</a>` : ''}</div>`).join('') || '<div class="muted small">暂无</div>'}
+    ${s.job && s.job.play_url ? `<video controls src="${esc(s.job.play_url)}" style="margin-top:8px"></video>` : ''}</div></div>`;
+}
+async function submitTool(btn) {
+  const src = ($('#tSrc') || {}).value || '', model = ($('#tModel') || {}).value || '';
+  if (!src) return toast('先选源视频', true);
+  if (!confirmCost([model], S.vtool === 'video_edit' ? '视频编辑' : '动作迁移')) return;
+  const body = {shot_id: S.shotId, tool: S.vtool, instruction: $('#tIns').value, model,
+    source_job_id: src.startsWith('job:') ? src.slice(4) : null, source_material_id: src.startsWith('mat:') ? src.slice(4) : null,
+    form_id: $('#tForm') ? $('#tForm').value : null};
+  await act(btn, () => api('POST', `/projects/${S.pid}/videos/tool`, body), r => `已提交 v${r.version}（${r.model}，${r.seconds}s，约 ${rmb(r.quoted_rmb)}）`);
 }
 function toggleRef(fid, on) {
   const s = S.p.shots.find(x => x.id === S.shotId), P = vp();
@@ -648,7 +704,7 @@ async function quoteOne(btn) {
 }
 async function genOne(btn) {
   if (!confirmCost([vp().model], '生成视频')) return;
-  await act(btn, () => api('POST', `/projects/${S.pid}/videos`, oneBody()), r => r.submitted.length ? `已提交 v${r.submitted[0].version}（${MODE[r.submitted[0].mode]}，${r.submitted[0].refs} 个参考）` : (r.skipped[0] || {}).reason || '没有提交');
+  await act(btn, () => submitVideos(oneBody()), r => r.submitted.length ? `已提交 v${r.submitted[0].version}（${MODE[r.submitted[0].mode]}，${r.submitted[0].refs} 个参考）` : (r.skipped[0] || {}).reason || '没有提交');
 }
 function shots_select(all) {
   const e = curEp(); S.sel.clear();
@@ -659,7 +715,7 @@ async function batchGen(btn) {
   const e = curEp(), st = S.p.settings;
   if (!confirmCost([st.video_model], '批量生成视频')) return;
   const body = S.sel.size ? {shot_ids: [...S.sel], force: false} : {episode_no: e.no};
-  await act(btn, () => api('POST', `/projects/${S.pid}/videos`, body), r => `已提交 ${r.submitted.length} 个，跳过 ${r.skipped.length} 个（预计 ${rmb(r.quote.total_rmb)}）`);
+  await act(btn, () => submitVideos(body), r => `已提交 ${r.submitted.length} 个，跳过 ${r.skipped.length} 个（预计 ${rmb(r.quote.total_rmb)}）`);
 }
 async function uploadMaterial(btn) {
   const files = await pickFile('image/*,audio/*,video/*', true);
@@ -695,7 +751,8 @@ function pgFinal() {
     <label class="small"><input type="checkbox" ${st.burn_subtitles ? 'checked' : ''} onchange="act(null,()=>api('PATCH','/projects/${S.pid}/settings',{burn_subtitles:this.checked}),'已保存')"> 字幕烧进画面</label>
     <button class="primary" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble'),'已合成')">合成全部剧集</button>
     <button onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?allow_partial=true'),'已合成（跳过缺的镜头）')">跳过缺镜头合成</button>
-    <a href="/projects/${S.pid}/download?what=finals"><button>下载全部成片</button></a></div></div>
+    <a href="/projects/${S.pid}/download?what=finals"><button>下载全部成片</button></a>
+    <a href="/projects/${S.pid}/edit-package"><button title="编号片段 + 字幕 + EDL/FCPXML">导出剪辑工程</button></a></div></div>
   <div class="grid">${S.p.episodes.map(e => `<div class="card"><div class="row"><b>${esc(e.title)}</b>${e.final_url ? `<span class="badge ok">${e.final_seconds.toFixed(1)} 秒</span>` : '<span class="badge">未合成</span>'}
     <span class="spacer"></span><span class="small muted">${e.videos_done}/${e.shots} 镜头已出片</span></div>
     ${e.final_url ? `<video controls src="${esc(e.final_url)}" style="margin-top:8px"></video><div class="row" style="margin-top:6px"><a href="${esc(e.final_url)}" download>下载视频</a><a href="${esc(e.srt_url)}" download>下载字幕</a></div>` : ''}
