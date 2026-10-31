@@ -1,5 +1,6 @@
 """零成本核对“模型是否已开通”：对每个候选模型发一个参数故意写错的请求。
 已开通 → 400 参数错误；没开通 → 404/403。请求不会生成任何内容，不扣费。
+只用于同步校验参数的接口（火山方舟、百炼图像）。百炼视频是异步接口，错参也会排队生成，绝不在这里探测。
 
     py -3.12 tools/probe_access.py
 """
@@ -54,11 +55,9 @@ def main() -> int:
             print("== 百炼：模型列表里的图像/视频")
             print("  ", ", ".join(x for x in ids if re.search(r"wan|image|wanx|kling|video", x)))
             print("== 百炼：视频（万相）")
-            cands = ["wan3.0-video", "wan3.0-video-prime"] + [x for x in ids if re.search(r"^wan", x) and re.search(r"t2v|i2v|r2v|video", x)]
-            for m in list(dict.fromkeys(cands))[:12]:
-                r = c.post(f"{DS}/api/v1/services/aigc/video-generation/video-synthesis", headers=h,
-                           json={"model": m, "input": {"prompt": "test"}, "parameters": {"duration": 999}})
-                print(f"  {m}: {verdict(r)}")
+            # 注意：百炼视频接口是异步的，参数错误不会在提交时被拒，而是直接排队生成（会扣费）。
+            # 所以这里绝不提交任务，只提示：能否使用以控制台为准，或用 real_check.py 做一次有上限的真实验证。
+            print("   不做提交探测（异步接口会真的排队生成并扣费）。万相 3.0 已确认可以创建任务。")
             print("== 百炼：图像")
             for m in [x for x in ids if re.search(r"^(qwen-image|wan.*t2i|wanx)", x)][:12]:
                 r = c.post(f"{DS}/api/v1/services/aigc/text2image/image-synthesis", headers=h,
