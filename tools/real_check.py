@@ -71,6 +71,8 @@ def main() -> int:
     t = step("一键剧本（真实文本模型）")
     r = call("POST", f"/projects/{pid}/script/generate", {"idea": a.idea, "episodes": a.episodes, "seconds_per_ep": 60})
     print(f"来源 {r['generated_source']}  {r['script_check']}  {time.time() - t:.1f}s")
+    if r["generated_source"] != "real":
+        print("[x] 文本模型没调通（退回了本地模板），看 data/logs/workflow.log"); return 1
     print(r["script_text"][:600])
 
     t = step("全剧解析")
@@ -79,6 +81,8 @@ def main() -> int:
 
     t = step("AI 抽取资产")
     r = call("POST", f"/projects/{pid}/assets/extract?engine=ai")
+    if r["source"] != "real":
+        print("[x] AI 抽取没调通"); return 1
     print(f"来源 {r['source']}  新增 {len(r['added'])}：", [(x["kind"], x["name"], x["forms"]) for x in r["added"]][:20])
     chars = [x for x in r["state"]["assets"] if x["kind"] == "character"]
     if not chars:

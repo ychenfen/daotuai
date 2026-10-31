@@ -12,7 +12,11 @@ import os
 import re
 from collections import Counter
 
+import logging
+
 from .agg import Agg, AggError
+
+log = logging.getLogger("workflow.llm")
 
 SIZES = ["史诗大远景", "全景", "中景", "近景", "特写"]
 ANGLES = ["俯拍", "平视", "仰拍", "低机位", "过肩"]
@@ -114,7 +118,8 @@ async def generate_script(agg: Agg, model: str, idea: str, episodes: int, style:
                              f"画风：{style}\n集数：{episodes}\n素材：\n{idea[:12000]}", 8000, 0.7)
             if re.search(r"第\s*1\s*集", text or ""):
                 return text.strip(), "real"
-        except (AggError, KeyError, TypeError):
+        except (AggError, KeyError, TypeError) as e:
+            log.warning("模型调用失败，退回本地规则：%s", str(e)[:300])
             if _strict(engine):
                 raise
     return mock_script(idea, episodes, style), "mock"
@@ -258,7 +263,8 @@ async def extract_assets(agg: Agg, script: str, style: str, model: str, engine: 
             got = _norm_assets(data or {})
             if got["characters"] or got["scenes"]:
                 return got, "real"
-        except (AggError, KeyError, TypeError):
+        except (AggError, KeyError, TypeError) as e:
+            log.warning("模型调用失败，退回本地规则：%s", str(e)[:300])
             if _strict(engine):
                 raise
     return mock_assets(script, style), "mock"
@@ -277,7 +283,8 @@ async def polish(agg: Agg, model: str, kind: str, name: str, description: str, s
                               600, 0.5)).strip()
             if len(text) >= 10:
                 return text[:600], "real"
-        except (AggError, KeyError, TypeError):
+        except (AggError, KeyError, TypeError) as e:
+            log.warning("模型调用失败，退回本地规则：%s", str(e)[:300])
             if _strict(engine):
                 raise
     extra = {"character": "五官立体、服装层次清晰、配色统一、气质鲜明",
@@ -411,7 +418,8 @@ async def storyboard(agg: Agg, scenes: list[dict], style: str, model: str, max_s
                                      [s["code"] for s in scenes])
             if shots:
                 return shots, "real"
-        except (AggError, KeyError, TypeError):
+        except (AggError, KeyError, TypeError) as e:
+            log.warning("模型调用失败，退回本地规则：%s", str(e)[:300])
             if _strict(engine):
                 raise
     return mock_storyboard(scenes, style, char_names, dur_min, dur_max, target, max_shots), "mock"
@@ -525,7 +533,8 @@ async def prompts(agg: Agg, shots: list[dict], style: str, model: str, aspect: s
                     else:
                         out.append(mock_prompt(s, style, aspect, voices, fmt, video_model))
                 return out, "real"
-        except (AggError, KeyError, TypeError):
+        except (AggError, KeyError, TypeError) as e:
+            log.warning("模型调用失败，退回本地规则：%s", str(e)[:300])
             if _strict(engine):
                 raise
     return [mock_prompt(s, style, aspect, voices, fmt, video_model) for s in shots], "mock"

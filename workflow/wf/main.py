@@ -455,6 +455,8 @@ async def videos(pid: str, force: bool = False, resolution: str | None = None,
     body = body or {}
     return await wf().submit_videos(pid, mode=body.get("mode"), aspect_ratio=body.get("aspect_ratio"),
                                     form_ids=body.get("form_ids"), material_ids=body.get("material_ids"),
+                                    accept_stale=bool(body.get("accept_stale")),
+                                    allow_missing=bool(body.get("allow_missing")),
                                     **_video_args(body, force, resolution))
 
 

@@ -216,6 +216,7 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
                 pr["bindings"] = db.load(pr.pop("bindings_json"), [])
                 pr["unresolved"] = db.load(pr.pop("unresolved_json"), [])
                 pr["stale"] = refs.stale(pr["bindings"], forms_by_id)
+                pr["suggestions"] = refs.suggest(pr["unresolved"], assets) if pr["unresolved"] else {}
             s["prompt"] = pr
             s["jobs"] = jobs.get(s["id"], [])
             s["job"] = next((j for j in s["jobs"] if j["id"] == s["selected_job_id"]), None) \
@@ -658,7 +659,8 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
                 "generated": len(r["generated"]), "failed": len(r["failed"])}))
         summary["prompts"] = await step("提示词", _brief(self.prompts(pid), lambda r: {
             "generated": r["generated"], "source": r["source"]}))
-        summary["videos"] = await step("提交视频", _brief(self.submit_videos(pid, resolution=resolution),
+        summary["videos"] = await step("提交视频", _brief(self.submit_videos(pid, resolution=resolution, accept_stale=True,
+                                                                         allow_missing=True),
                                                        lambda r: {"submitted": len(r["submitted"]),
                                                                   "skipped": len(r["skipped"]),
                                                                   "quoted_rmb": r["quote"]["total_rmb"]}))

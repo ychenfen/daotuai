@@ -10,7 +10,7 @@ import zipfile
 
 from . import db, media
 from .agg import AggError
-from .errors import BudgetExceeded, NotFound, WorkflowError
+from .errors import BudgetExceeded, Conflict, NotFound, WorkflowError
 from .util import new_id, short_hash
 
 log = logging.getLogger("workflow.video")
@@ -145,12 +145,14 @@ class VideoMixin:
                             resolution: str | None = None, mode: str | None = None, model: str | None = None,
                             duration: float | None = None, aspect_ratio: str | None = None,
                             form_ids: list[str] | None = None, material_ids: list[str] | None = None,
-                            episode_no: int | None = None) -> dict:
+                            episode_no: int | None = None, accept_stale: bool = False,
+                            allow_missing: bool = False) -> dict:
         quote = await self.quote_videos(pid, shot_ids, force, resolution, model, duration, episode_no)
         if quote["items"] and not quote["within_budget"]:
             raise BudgetExceeded(
                 f"超出项目预算：本次约 ¥{quote['total_rmb']:.2f}，剩余 ¥{quote['remaining_rmb']:.2f}"
                 f"（预算 ¥{quote['budget_rmb']:.2f}）。调高预算或少选几个镜头。", quote)
+        self._reference_gate(pid, [i["shot"] for i in quote["items"]], accept_stale, allow_missing, form_ids)
         self.resolve_references(pid, shot_ids)
         proj = self.get(pid)
         st = proj["settings"]
@@ -194,6 +196,49 @@ class VideoMixin:
             self.notify(pid, "info", f"已提交 {len(submitted)} 个镜头出片",
                         f"{model} · {res} · 预计 ¥{quote['total_rmb']:.2f}")
         return {"project": pid, "submitted": submitted, "skipped": skipped, "quote": quote}
+
+    def _reference_gate(self, pid: str, shot_ids: list[str], accept_stale: bool, allow_missing: bool,
+                        form_ids: list[str] | None) -> None:
+        """提交前的参考一致性闸门（对应刀徒的“参考素材已变化”，但给出明细并允许一键确认）：
+        - 提示词写好后，引用的资产又换了图（版本变了）→ 需要 accept_stale 确认用最新版；
+        - 引用的资产还没有图 → 需要 allow_missing 确认不带它的参考图出片。"""
+        if accept_stale and allow_missing:
+            return
+        proj = self.get(pid)
+        forms = {f["id"]: (a, f) for a in proj["assets"] for f in a["forms"]}
+        stale, missing = [], []
+        for s in proj["shots"]:
+            if s["id"] not in shot_ids or not s.get("prompt"):
+                continue
+            binds = s["prompt"]["bindings"]
+            if form_ids is not None:   # 手选参考时只检查手选的
+                binds = [{"form_id": x, "version": forms[x][1]["current_version"]} for x in form_ids if x in forms]
+            for b in binds:
+                af = forms.get(b.get("form_id") or "")
+                if not af:
+                    continue
+                a, f = af
+                if a["kind"] == "audio":
+                    continue
+                label = a["name"] + ("" if f["is_default"] else f"（{f['name']}）")
+                if not f["current_version"]:
+                    missing.append({"code": s["code"], "asset": label})
+                elif int(b.get("version") or 0) != int(f["current_version"]):
+                    stale.append({"code": s["code"], "asset": label, "from": b.get("version"), "to": f["current_version"]})
+        problems = {}
+        if stale and not accept_stale:
+            problems["stale"] = stale
+        if missing and not allow_missing:
+            problems["missing"] = missing
+        if problems:
+            parts = []
+            if "stale" in problems:
+                parts.append("这些资产在写提示词之后换过图：" + "、".join(
+                    f"{x['code']} {x['asset']} v{x['from']}→v{x['to']}" for x in stale[:8]))
+            if "missing" in problems:
+                parts.append("这些引用的资产还没有图：" + "、".join(f"{x['code']} {x['asset']}" for x in missing[:8]))
+            raise Conflict("参考素材已变化。" + "；".join(parts) + "。确认后会按当前版本提交。",
+                           {"code": "reference_changed", **problems})
 
     async def poll_videos(self, pid: str | None = None) -> dict:
         """推进所有在跑的视频任务（pid=None 时跨项目）。成功即下载到本地、抽封面，并设为该镜头的选用版本。

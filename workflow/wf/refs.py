@@ -92,3 +92,21 @@ def stale(bindings: list[dict], forms_by_id: dict[str, dict]) -> list[dict]:
         elif int(f.get("current_version") or 0) != int(b.get("version") or 0):
             out.append({**b, "reason": "version_changed", "current_version": f.get("current_version")})
     return out
+
+
+def suggest(unresolved: list[str], assets: list[dict], n: int = 3) -> dict[str, list[str]]:
+    """未解析的 @ 给出相近的写法（“是不是 @孔宣”）。"""
+    import difflib
+    keys = []
+    for a in assets:
+        for name in [a["name"]] + list(a.get("aliases") or []):
+            keys.append(name)
+            keys += [f"{name}（{f['name']}形态）" for f in a.get("forms") or [] if f["name"] != "默认"]
+    out = {}
+    for u in unresolved:
+        base = re.sub(r"[（(].*$", "", u)
+        cands = difflib.get_close_matches(u, keys, n=n, cutoff=0.4) or difflib.get_close_matches(base, keys, n=n, cutoff=0.4)
+        cands += [k for k in keys if base and (base in k or k in base) and k not in cands]
+        if cands:
+            out[u] = ["@" + c for c in cands[:n]]
+    return out

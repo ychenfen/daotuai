@@ -41,9 +41,26 @@ def _raise(r: httpx.Response, what: str) -> None:
     raise AggError(f"{what} failed {r.status_code}: {r.text[:300]}", r.status_code, code)
 
 
+AUTO_TOPUP = float(os.environ.get("WORKFLOW_AUTO_TOPUP", "100"))
+
+
 class Agg:
-    def __init__(self, client: httpx.AsyncClient):
+    """聚合层钱包只是内部记账：任何调用遇到 402（余额不足）都先按 WORKFLOW_AUTO_TOPUP 充值再重试一次。
+    真正的花钱上限由项目预算（budget_rmb）控制。"""
+
+    def __init__(self, client: httpx.AsyncClient, auto_topup_rmb: float | None = None):
         self.c = client
+        self.auto_topup_rmb = AUTO_TOPUP if auto_topup_rmb is None else auto_topup_rmb
+
+    async def _post(self, path: str, what: str, json: dict, idem: str | None = None) -> dict:
+        for attempt in (1, 2):
+            r = await self.c.post(path, headers=self._h(idem), json=json)
+            if r.status_code == 402 and attempt == 1 and self.auto_topup_rmb > 0:
+                await self.topup(self.auto_topup_rmb)
+                continue
+            _raise(r, what)
+            return r.json()
+        raise AggError(f"{what} failed: insufficient funds", 402)
 
     @staticmethod
     def _h(idem: str | None = None) -> dict:
@@ -74,20 +91,16 @@ class Agg:
 
     async def chat(self, model: str, messages: list[dict], max_tokens: int = 2000,
                    temperature: float = 0.3) -> dict:
-        r = await self.c.post("/v1/chat/completions", headers=self._h(),
-                              json={"model": model, "messages": messages, "max_tokens": max_tokens,
-                                    "temperature": temperature})
-        _raise(r, "chat")
-        return r.json()
+        return await self._post("/v1/chat/completions", "chat",
+                                {"model": model, "messages": messages, "max_tokens": max_tokens,
+                                 "temperature": temperature})
 
     async def image(self, model: str, prompt: str, size: str = "1024x1024",
                     refs: list[str] | None = None, idem: str | None = None) -> dict:
         body = {"model": model, "prompt": prompt, "n": 1, "size": size}
         if refs:
             body["image"] = refs
-        r = await self.c.post("/v1/images/generations", headers=self._h(idem), json=body)
-        _raise(r, "image")
-        return r.json()
+        return await self._post("/v1/images/generations", "image", body, idem)
 
     async def submit_video(self, model: str, prompt: str, resolution: str, duration_s: float,
                            aspect_ratio: str = "9:16", images: list[dict] | None = None,
@@ -96,9 +109,7 @@ class Agg:
                 "duration": duration_s, "aspect_ratio": aspect_ratio}
         if images:
             body["images"] = images
-        r = await self.c.post("/v1/videos/generations", headers=self._h(idem), json=body)
-        _raise(r, "video submit")
-        return r.json()
+        return await self._post("/v1/videos/generations", "video submit", body, idem)
 
     async def poll_video(self, task_id: str) -> dict:
         r = await self.c.get(f"/v1/videos/{task_id}", headers=self._h())
