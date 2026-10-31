@@ -47,14 +47,15 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=3)
     ap.add_argument("--budget", type=float, default=2.5)
     ap.add_argument("--text-model", default="deepseek-chat")
-    ap.add_argument("--image-model", default="seedream-4.0")
-    ap.add_argument("--video-model", default="seedance-1.0-pro")
+    ap.add_argument("--image-model", default="seedream-5.0-flash")
+    ap.add_argument("--video-model", default="ark-seedance-2.0-fast")
+    ap.add_argument("--skip-video", action="store_true", help="只验证文本+出图（视频模型还没开通时用）")
     ap.add_argument("--wait", type=int, default=900, help="等视频回执的最长秒数")
     a = ap.parse_args()
 
     h = call("GET", "/healthz")
     print("工作台：", json.dumps(h, ensure_ascii=False))
-    missing = [m for m in (a.text_model, a.image_model, a.video_model) if m not in h.get("live_models", [])]
+    missing = [m for m in (a.text_model, a.image_model) + (() if a.skip_video else (a.video_model,)) if m not in h.get("live_models", [])]
     if missing:
         print("[x] 这些模型当前不是真实渠道：", missing)
         return 1
@@ -112,6 +113,13 @@ def main() -> int:
     t = step("第 1 镜分镜图（带主角参考图）")
     r = call("POST", f"/projects/{pid}/frames", {"shot_ids": [s1["id"]]})
     print(json.dumps(r, ensure_ascii=False)[:300], f"{time.time() - t:.1f}s")
+
+    if a.skip_video:
+        st = call("GET", f"/projects/{pid}")
+        print("\n== 花费", json.dumps(st["spend"], ensure_ascii=False))
+        print("项目地址", f"{BASE}/ui/#/board/{pid}")
+        print("REAL_CHECK", "PASS（文本+出图；视频跳过）")
+        return 0
 
     t = step(f"第 1 镜出片（{a.video_model}，首帧参考，5 秒 480P）")
     q = call("POST", f"/projects/{pid}/videos/quote", {"shot_ids": [s1["id"]], "duration": 5})

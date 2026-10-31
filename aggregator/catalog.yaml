@@ -25,35 +25,68 @@ models:
 
   # 火山方舟文本模型需要先在控制台“开通模型”，2026-10-31 实测 doubao-seed-1-6 / deepseek-v3-1 均返回 404（未开通），暂不挂。
 
-  - id: seedream-4.0
+  # ---- 火山方舟 · 图像（2026-10-31 实测已开通：Seedream 5.0 Pro / Flash；4.0、4.5 未开通）----
+  - id: seedream-5.0-flash
     type: image
     unit: image
-    price: { rmb_per_image: 0.2 }
+    price: { rmb_per_image: 0.2 }      # 估算，以火山账单为准
     cost: { rmb_per_image: 0.2 }
     routes:
-      - { provider: volcengine_official, api_id: doubao-seedream-4-0-250828, weight: 1 }
+      - { provider: volcengine_official, api_id: doubao-seedream-5-0-flash-260915, weight: 1 }
 
-  - id: seedance-1.0-pro
+  - id: seedream-5.0-pro
+    type: image
+    unit: image
+    price: { rmb_per_image: 0.3 }
+    cost: { rmb_per_image: 0.3 }
+    routes:
+      - { provider: volcengine_official, api_id: doubao-seedream-5-0-pro-260628, weight: 1 }
+
+  # ---- 火山方舟 · 视频（2026-10-31：全部“未开通”，需在火山方舟控制台 → 开通管理 里开通后才能用）----
+  # 价格按刀徒同规格的售价估算（偏保守，用来卡预算），以火山账单为准。
+  - id: ark-seedance-2.0-fast
     type: video
     unit: output_second
-    price: { rmb_per_second: { 480P: 0.15, 720P: 0.33, 1080P: 0.74 } }
-    cost: { rmb_per_second: { 480P: 0.15, 720P: 0.33, 1080P: 0.74 } }
+    price: { rmb_per_second: { 480P: 0.40, 720P: 0.90, 1080P: 2.00 } }
+    cost: { rmb_per_second: { 480P: 0.40, 720P: 0.90, 1080P: 2.00 } }
     specs: [480P, 720P, 1080P]
-    duration: { min: 2, max: 12, step: 1 }
-    modes: [文生视频, 首帧参考]
+    duration: { min: 4, max: 15, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考]
     routes:
-      - { provider: volcengine_official, api_id: doubao-seedance-1-0-pro-250528, weight: 1 }
+      - { provider: volcengine_official, api_id: doubao-seedance-2-0-fast-260128, weight: 1 }
 
-  - id: seedance-1.0-lite-i2v
+  - id: ark-seedance-2.0
+    type: video
+    unit: output_second
+    price: { rmb_per_second: { 480P: 0.55, 720P: 1.20, 1080P: 2.80 } }
+    cost: { rmb_per_second: { 480P: 0.55, 720P: 1.20, 1080P: 2.80 } }
+    specs: [480P, 720P, 1080P]
+    duration: { min: 4, max: 15, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考]
+    routes:
+      - { provider: volcengine_official, api_id: doubao-seedance-2-0-260128, weight: 1 }
+
+  - id: ark-seedance-2.5
+    type: video
+    unit: output_second
+    price: { rmb_per_second: { 480P: 0.80, 720P: 1.75, 1080P: 4.30 } }
+    cost: { rmb_per_second: { 480P: 0.80, 720P: 1.75, 1080P: 4.30 } }
+    specs: [480P, 720P, 1080P]
+    duration: { min: 4, max: 15, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考]
+    routes:
+      - { provider: volcengine_official, api_id: doubao-seedance-2-5-260628, weight: 1 }
+
+  - id: ark-seedance-1.0-pro-fast
     type: video
     unit: output_second
     price: { rmb_per_second: { 480P: 0.10, 720P: 0.22, 1080P: 0.50 } }
     cost: { rmb_per_second: { 480P: 0.10, 720P: 0.22, 1080P: 0.50 } }
     specs: [480P, 720P, 1080P]
     duration: { min: 2, max: 12, step: 1 }
-    modes: [首帧参考, 全能参考]
+    modes: [文生视频, 首帧参考]
     routes:
-      - { provider: volcengine_official, api_id: doubao-seedance-1-0-lite-i2v-250428, weight: 1 }
+      - { provider: volcengine_official, api_id: doubao-seedance-1-0-pro-fast-251015, weight: 1 }
 
   # ================= 刀徒同款目录（对应渠道无 key 时走 mock，零成本） =================
   # ---------------- 文本 ----------------

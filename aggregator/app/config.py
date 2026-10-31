@@ -113,4 +113,8 @@ def candidates(model_id: str, spec: str | None = None) -> list[Route]:
     routes = [r for r in m.routes if spec is None or r.spec in (None, spec)]
     plist = providers()
     routes = [r for r in routes if r.provider in plist and plist[r.provider].enabled]
+    # 有真实线路时只走真实线路：真实失败不能悄悄降级到模拟线路（否则会把假视频当真视频交付）
+    live = [r for r in routes if plist[r.provider].live]
+    if live:
+        routes = live
     return sorted(routes, key=lambda r: -r.weight)

@@ -55,9 +55,9 @@ async def main() -> int:
     async with httpx.AsyncClient(transport=transport, base_url="http://agg") as c:
         print("\n[A] 模型目录与定价")
         h = (await c.get("/healthz")).json()
-        check("healthz ok", h.get("ok") is True and h["providers"] == 21 and h["models"] == 14, str(h))
+        check("healthz ok", h.get("ok") is True and h["providers"] == 21 and h["models"] == 17, str(h))
         ms = (await c.get("/v1/models")).json()["data"]
-        check("模型目录 14 个", len(ms) == 14, str(len(ms)))
+        check("模型目录 17 个", len(ms) == 17, str(len(ms)))
         check("强制 mock 时没有真实线路", not any(m["live"] for m in ms), str([m["id"] for m in ms if m["live"]]))
 
         q = (await c.post("/v1/quote", json={"model": "gpt-6.1-sol", "in_tokens": 1_000_000,
