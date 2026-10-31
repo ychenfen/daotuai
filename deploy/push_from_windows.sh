@@ -48,7 +48,7 @@ keys=$(grep -oE 'api_key_env:\s*[A-Z0-9_]+' aggregator/providers.yaml | awk '{pr
 sx 'umask 077; cat > /opt/daotuai/.env.new && mv /opt/daotuai/.env.new /opt/daotuai/.env && chmod 600 /opt/daotuai/.env' "$STAGE/env"
 if [ -n "${DAOTUAI_HTPASSWD:-}" ]; then   # 指定访问账号："用户名:$apr1$..."（只传哈希，不传明文）
   printf '%s\n' "$DAOTUAI_HTPASSWD" > "$STAGE/htpasswd"
-  sx 'sudo tee /etc/nginx/daotuai.htpasswd >/dev/null && sudo chown root:www-data /etc/nginx/daotuai.htpasswd && sudo chmod 640 /etc/nginx/daotuai.htpasswd && echo "  访问账号已设置：$(cut -d: -f1 /etc/nginx/daotuai.htpasswd)"' "$STAGE/htpasswd"
+  sx 'sudo tee /etc/nginx/daotuai.htpasswd >/dev/null && sudo chown root:www-data /etc/nginx/daotuai.htpasswd && sudo chmod 640 /etc/nginx/daotuai.htpasswd && echo "  访问账号已设置：$(sudo cut -d: -f1 /etc/nginx/daotuai.htpasswd)"' "$STAGE/htpasswd"
 fi
 for k in $keys; do [ -n "${!k:-}" ] && printf '  %s\n' "$k"; done
 
