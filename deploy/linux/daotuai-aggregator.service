@@ -1,0 +1,18 @@
+[Unit]
+Description=daotuai 模型聚合层 (127.0.0.1:8010)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/daotuai/aggregator
+EnvironmentFile=/opt/daotuai/.env
+Environment=PYTHONUTF8=1 PYTHONIOENCODING=utf-8
+ExecStart=/opt/daotuai/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+Restart=always
+RestartSec=3
+StandardOutput=append:/opt/daotuai/data/logs/aggregator.log
+StandardError=append:/opt/daotuai/data/logs/aggregator.log
+
+[Install]
+WantedBy=multi-user.target

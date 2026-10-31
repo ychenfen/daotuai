@@ -1,0 +1,18 @@
+[Unit]
+Description=daotuai 短剧工作台 (127.0.0.1:8011)
+After=network-online.target daotuai-aggregator.service
+Requires=daotuai-aggregator.service
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/daotuai/workflow
+EnvironmentFile=/opt/daotuai/.env
+Environment=PYTHONUTF8=1 PYTHONIOENCODING=utf-8 AGG_BASE=http://127.0.0.1:8010
+ExecStart=/opt/daotuai/venv/bin/python -m uvicorn wf.main:app --host 127.0.0.1 --port 8011
+Restart=always
+RestartSec=3
+StandardOutput=append:/opt/daotuai/data/logs/workflow.log
+StandardError=append:/opt/daotuai/data/logs/workflow.log
+
+[Install]
+WantedBy=multi-user.target
