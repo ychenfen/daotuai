@@ -70,6 +70,10 @@ function confirmCost(models, what) {
 function go(page, pid) {
   if (page === 'chat') S.chat = null;
   if (pid !== undefined) S.pid = pid;
+  if (NEED_PROJECT.has(page) && !S.pid && !S.list.length) {
+    toast('还没有项目：先在首页填项目名，点“新建项目”', true); page = 'home';
+    setTimeout(() => { const n = document.getElementById('npName'); if (n) n.focus(); }, 300);
+  }
   S.page = page; location.hash = `#/${page}${S.pid ? '/' + S.pid : ''}`; load();
 }
 const eps = () => (S.p ? S.p.episodes : []);
@@ -102,7 +106,7 @@ async function load() {
 }
 function renderChrome() {
   $('#rail').innerHTML = `<div class="logo">剧</div>` + PAGES.map(([k, ic, t]) =>
-    `<div class="nav ${S.page === k ? 'on' : ''} ${NEED_PROJECT.has(k) && !S.pid ? 'off' : ''}" onclick="go('${k}')"><span class="ic">${ic}</span>${t}</div>`).join('')
+    `<div class="nav ${S.page === k ? 'on' : ''}" title="${NEED_PROJECT.has(k) && !S.pid ? '先在首页新建或选择一个项目' : t}" onclick="go('${k}')"><span class="ic">${ic}</span>${t}</div>`).join('')
     + `<div class="ver">v0.3</div>`;
   const p = S.p, sp = p && p.spend, t = p && p.task, busy = t && (t.status === 'running' || t.status === 'queued');
   const pct = sp ? (sp.budget_rmb > 0 ? Math.min(100, sp.total_rmb / sp.budget_rmb * 100) : 100) : 0;
@@ -133,7 +137,7 @@ function toggleTheme() {
 function render() {
   const fn = {home: pgHome, script: pgScript, assets: pgAssets, board: pgBoard, blocking: pgBlocking, prompts: pgPrompts,
     videos: pgVideos, final: pgFinal, chat: pgChat, help: pgHelp}[S.page] || pgHome;
-  if (NEED_PROJECT.has(S.page) && !S.p) { $('#page').innerHTML = '<div class="empty">先在首页新建或选择一个项目</div>'; return; }
+  if (NEED_PROJECT.has(S.page) && !S.p) { $('#page').innerHTML = `<div class="empty">先新建或选择一个项目<br><br><button class="primary" onclick="go('home')">去首页新建项目</button></div>`; return; }
   $('#page').innerHTML = fn();
   if (S.page === 'chat') { const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight; }
 }
