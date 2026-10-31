@@ -1,0 +1,25 @@
+# 运行时与本机数据：不进仓库
+__pycache__/
+*.pyc
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+media/
+exports/
+
+# 登录态、抓包原始数据、日志（含账号信息）
+browser/
+probe_api/*.json
+probe_api/*.txt
+*.log
+tools/*.txt
+
+# 大文件：截图、PDF、视频
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.mp4
+screens/index.html

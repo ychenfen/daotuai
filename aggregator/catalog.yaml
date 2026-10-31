@@ -1,0 +1,128 @@
+# 统一模型目录：模型 -> 能力契约 -> 上游线路 -> 价格（price = 对外零售，cost = 上游批发）
+# 价格口径：RMB。积分 = RMB × 10（沿用刀徒的 1 元 = 10 积分）。
+models:
+  # ---------------- 文本 ----------------
+  - id: gpt-6.1-sol
+    type: chat
+    context: 200000
+    unit: tokens
+    price: { input_rmb_per_m: 8.054, output_rmb_per_m: 40.266 }
+    cost: { input_rmb_per_m: 5.5, output_rmb_per_m: 27.0 }
+    routes:
+      - { provider: a6_api,       api_id: gpt-6.1-sol, weight: 1,
+          cost: { input_rmb_per_m: 8.054, output_rmb_per_m: 40.266 } }
+      - { provider: dmxapi,       api_id: gpt-6.1-sol, weight: 2,
+          cost: { input_rmb_per_m: 5.5, output_rmb_per_m: 27.0 } }
+      - { provider: custom_api_1, api_id: gpt-6.1-sol, weight: 3,
+          cost: { input_rmb_per_m: 0.72, output_rmb_per_m: 3.6 } }
+
+  - id: gpt-6-astra
+    type: chat
+    context: 400000
+    unit: tokens
+    price: { input_rmb_per_m: 99.28, output_rmb_per_m: 496.4 }
+    cost: { input_rmb_per_m: 99.28, output_rmb_per_m: 496.4 }
+    routes:
+      - { provider: a6_api,       api_id: gpt-6-astra, weight: 1 }
+      - { provider: custom_api_1, api_id: gpt-6-astra, weight: 1 }
+
+  - id: gemini-3.8-flash
+    type: chat
+    context: 1000000
+    unit: tokens
+    price: { input_rmb_per_m: 1.2, output_rmb_per_m: 6.0 }
+    cost: { input_rmb_per_m: 0.9, output_rmb_per_m: 4.5 }
+    routes:
+      - { provider: suixiang_api, api_id: gemini-3.8-flash, weight: 1 }
+      - { provider: dmxapi,       api_id: gemini-3.8-flash, weight: 1 }
+
+  # ---------------- 图像 ----------------
+  - id: gpt-image-2.5
+    type: image
+    unit: image
+    price: { rmb_per_image: 0.5 }
+    cost: { rmb_per_image: 0.32 }
+    routes:
+      - { provider: custom_api_6, api_id: gpt-image-2.5, weight: 1 }
+      - { provider: dmxapi,       api_id: gpt-image-2.5, weight: 1,
+          cost: { rmb_per_image: 0.42 } }
+
+  - id: gpt-image-2.5-sunburst
+    type: image
+    unit: image
+    price: { rmb_per_image: 0.5 }
+    cost: { rmb_per_image: 0.35 }
+    routes:
+      - { provider: custom_api_6, api_id: gpt-image-2.5-sunburst, weight: 1 }
+
+  # ---------------- 视频（按输出秒计费） ----------------
+  - id: seedance-2.5
+    type: video
+    unit: output_second
+    price:
+      rmb_per_second:
+        480P: 0.80     # 实测：刀徒视频页显示 "480P (8 积分/秒)" = ¥0.80/s
+        720P: 1.75
+        1080P: 4.30
+    cost:
+      rmb_per_second:
+        480P: 0.672    # 火山方舟官方：5s 480P ≈ ¥3.36
+        720P: 1.512    # 5s 720P ≈ ¥7.56
+        1080P: 3.742   # 5s 1080P ≈ ¥18.71
+    specs: [480P, 720P, 1080P]
+    duration: { min: 4, max: 30, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考]
+    routes:
+      - { provider: ch_ai_video,  api_id: rd-seedance-2.5-480p,  spec: 480P, group: RD渠道, weight: 2 }
+      - { provider: ch_ai_video,  api_id: seedance-2.5-480p,     spec: 480P, group: 纯血,   weight: 1 }
+      - { provider: custom_api_1, api_id: seedance2.5-A,         spec: 480P, group: default, weight: 1,
+          cost: { rmb_per_second: { 480P: 0.62 } } }
+      - { provider: ch_ai_video,  api_id: hd-seedance-2.5-480p,  spec: 480P, group: default, weight: 1 }
+      - { provider: custom_api_1, api_id: sd25-30s,              spec: 720P, group: 低价,   weight: 2,
+          cost: { rmb_per_second: { 720P: 1.35 } } }
+      - { provider: new_api,      api_id: seedance-2.5-720p,     spec: 720P, group: default, weight: 1 }
+      - { provider: xb_api,       api_id: seedance-2.5-720p,     spec: 720P, group: default, weight: 1 }
+      - { provider: mengyu_video, api_id: seedance-2.5-720p,     spec: 720P, group: default, weight: 1 }
+      - { provider: ch_ai_video,  api_id: rd-seedance-2.5-1080p, spec: 1080P, group: RD渠道, weight: 1 }
+      - { provider: custom_api_1, api_id: seedance-2.5-1080p,    spec: 1080P, group: default, weight: 1 }
+
+  - id: seedance-2.0
+    type: video
+    unit: output_second
+    price:
+      rmb_per_second: { 480P: 0.55, 720P: 1.20, 1080P: 2.80, 4K: 9.00 }
+    cost:
+      rmb_per_second: { 480P: 0.42, 720P: 0.95, 1080P: 2.20, 4K: 7.20 }
+    specs: [480P, 720P, 1080P, 4K]
+    duration: { min: 4, max: 30, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考]
+    routes:
+      - { provider: ch_ai_video,  api_id: seedance-2.0-480p,  spec: 480P, group: 纯血, weight: 1 }
+      - { provider: custom_api_1, api_id: seedance-2.0-720p,  spec: 720P, weight: 1 }
+      - { provider: ch_ai_video,  api_id: seedance-2.0-4k,    spec: 4K,   group: 码上AI, weight: 1 }
+
+  - id: wan-3.0
+    type: video
+    unit: output_second
+    price:
+      rmb_per_second: { 480P: 0.40, 720P: 0.85, 1080P: 2.10 }
+    cost:
+      rmb_per_second: { 480P: 0.30, 720P: 0.65, 1080P: 1.70 }
+    specs: [480P, 720P, 1080P]
+    duration: { min: 4, max: 30, step: 1 }
+    modes: [文生视频, 首帧参考]
+    routes:
+      - { provider: xb_api,       api_id: wan-3.0, spec: 480P, weight: 1 }
+      - { provider: ch_ai_video,  api_id: WAN-3.0, spec: 720P, group: WAN 3.0, weight: 1 }
+      - { provider: mengyu_video, api_id: wan-3.0, spec: 1080P, weight: 1 }
+
+  - id: omni-flash-video-edit
+    type: video_edit
+    unit: input_second
+    price: { rmb_per_second: { 720P: 1.10, 1080P: 2.60, 4K: 8.00 } }
+    cost: { rmb_per_second: { 720P: 0.85, 1080P: 2.00, 4K: 6.40 } }
+    specs: [720P, 1080P, 4K]
+    duration: { min: 1, max: 30, step: 1 }
+    modes: [视频编辑]
+    routes:
+      - { provider: mengyu_video, api_id: omni-flash-video-edit, spec: 720P, weight: 1 }

@@ -1,0 +1,137 @@
+# 上游渠道（对应刀徒 /api/system/status 里的 api_services）
+# kind: openai = OpenAI 兼容 /v1/chat/completions；ark = 火山方舟视频任务；mock = 无 key 时的本地假实现
+providers:
+  - id: dmxapi
+    label: DM API
+    kind: openai
+    base_url: https://www.dmxapi.cn/v1
+    api_key_env: DMXAPI_KEY
+    concurrency: 8
+    timeout_s: 120
+  - id: xc_api
+    label: XC API
+    kind: openai
+    base_url: https://api.xcapi.cn/v1
+    api_key_env: XC_API_KEY
+    concurrency: 8
+    timeout_s: 120
+  - id: suixiang_api
+    label: SX API
+    kind: openai
+    base_url: https://api.suixiangai.com/v1
+    api_key_env: SX_API_KEY
+    concurrency: 8
+    timeout_s: 120
+  - id: xb_api
+    label: XB API
+    kind: openai
+    base_url: https://api.xbapi.cn/v1
+    api_key_env: XB_API_KEY
+    concurrency: 6
+    timeout_s: 120
+  - id: new_api
+    label: New API
+    kind: openai
+    base_url: https://api.newapi.example/v1
+    api_key_env: NEW_API_KEY
+    concurrency: 8
+    timeout_s: 120
+  - id: a6_api
+    label: A6 API
+    kind: openai
+    base_url: https://api.a6api.com/v1
+    api_key_env: A6_API_KEY
+    concurrency: 6
+    timeout_s: 120
+  - id: xy_api
+    label: XY API
+    kind: openai
+    base_url: https://api.xyapi.cn/v1
+    api_key_env: XY_API_KEY
+    concurrency: 4
+    timeout_s: 120
+  - id: gg_api
+    label: GG API
+    kind: openai
+    base_url: https://api.ggapi.cn/v1
+    api_key_env: GG_API_KEY
+    concurrency: 4
+    timeout_s: 120
+  - id: volcengine_official
+    label: Volcengine Ark
+    kind: ark
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY
+    concurrency: 10
+    timeout_s: 180
+  - id: third_party_jimeng
+    label: Jimeng API
+    kind: ark
+    base_url: https://ark.ap-southeast.bytepluses.com/api/v3
+    api_key_env: JIMENG_API_KEY
+    concurrency: 4
+    timeout_s: 180
+  - id: mengyu_video
+    label: MY API
+    kind: openai
+    base_url: https://api.mengyuai.com/v1
+    api_key_env: MY_API_KEY
+    concurrency: 6
+    timeout_s: 180
+  - id: ch_ai_video
+    label: CH AI
+    kind: openai
+    base_url: https://api.chai.example/v1
+    api_key_env: CH_AI_KEY
+    concurrency: 10
+    timeout_s: 180
+  - id: xrtoken_video
+    label: XR API
+    kind: openai
+    base_url: https://api.xrtoken.cn/v1
+    api_key_env: XR_API_KEY
+    concurrency: 4
+    timeout_s: 180
+  - id: custom_api_1
+    label: LI API
+    kind: openai
+    base_url: https://api.li.example/v1
+    api_key_env: LI_API_KEY
+    concurrency: 6
+    timeout_s: 180
+  - id: custom_api_2
+    label: 上海煜邦
+    kind: openai
+    base_url: https://api.yubang.example/v1
+    api_key_env: YUBANG_KEY
+    concurrency: 2
+    timeout_s: 180
+  - id: custom_api_5
+    label: WC API
+    kind: openai
+    base_url: https://api.wc.example/v1
+    api_key_env: WC_API_KEY
+    concurrency: 2
+    timeout_s: 180
+  - id: custom_api_6
+    label: KUN API
+    kind: openai
+    base_url: https://api.kun.example/v1
+    api_key_env: KUN_API_KEY
+    concurrency: 8
+    timeout_s: 180
+  - id: custom_api_7
+    label: LD API
+    kind: openai
+    base_url: https://api.ld.example/v1
+    api_key_env: LD_API_KEY
+    concurrency: 4
+    timeout_s: 180
+  - id: seedance_ip
+    label: HG API
+    kind: openai
+    base_url: https://api.hg.example/v1
+    api_key_env: HG_API_KEY
+    enabled: false
+    concurrency: 2
+    timeout_s: 180
