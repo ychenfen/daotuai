@@ -11,13 +11,9 @@ import uuid
 from typing import Awaitable, Callable
 
 from . import db
-from .pipeline import WorkflowError
+from .errors import Busy, WorkflowError
 
 log = logging.getLogger("workflow.runner")
-
-
-class Busy(WorkflowError):
-    status = 409
 
 
 class Progress:

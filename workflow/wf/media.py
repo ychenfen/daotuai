@@ -149,6 +149,32 @@ def probe(path: str) -> dict:
             "has_audio": any(s.get("codec_type") == "audio" for s in data.get("streams") or [])}
 
 
+# ---------------- 截取 ----------------
+
+async def poster(src: str, dst: str, at: float = 0.5) -> str:
+    """抽一帧做封面。"""
+    ff = ffmpeg_bin()
+    if not ff:
+        raise MediaError("没有 ffmpeg")
+    await asyncio.to_thread(_run, [ff, "-y", "-loglevel", "error", "-ss", f"{at:.2f}", "-i", src,
+                                   "-frames:v", "1", "-q:v", "4", dst], None, 60)
+    return dst
+
+
+async def extract_audio(src: str, dst: str, start: float, seconds: float) -> str:
+    """从视频里截一段音频（m4a/aac），用作角色音色参考。"""
+    ff = ffmpeg_bin()
+    if not ff:
+        raise MediaError("没有找到 ffmpeg，无法截取音色")
+    info = probe(src)
+    if info and not info.get("has_audio"):
+        raise MediaError("这个视频没有音轨，截不出音色")
+    await asyncio.to_thread(_run, [ff, "-y", "-loglevel", "error", "-ss", f"{max(0.0, start):.3f}", "-t",
+                                   f"{seconds:.3f}", "-i", src, "-vn", "-c:a", "aac", "-b:a", "128k", dst],
+                            None, 120)
+    return dst
+
+
 # ---------------- 字幕 ----------------
 
 def _ts(t: float) -> str:

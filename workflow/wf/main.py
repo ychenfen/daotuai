@@ -1,4 +1,4 @@
-"""工作流 HTTP 层 + 网页界面（/）+ 本地素材（/media）。"""
+"""工作流 HTTP 层 + 网页界面（/ui）+ 本地素材（/media）。"""
 from __future__ import annotations
 
 import asyncio
@@ -6,14 +6,16 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import Body, FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import BackgroundTasks, Body, FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db, llm, media
 from .agg import Agg, AggError, make_client
-from .pipeline import Conflict, Workflow, WorkflowError
+from .errors import WorkflowError
+from .pipeline import DEFAULT_SETTINGS, Workflow
 from .runner import Runner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -22,6 +24,7 @@ log = logging.getLogger("workflow")
 
 AUTO_TOPUP = float(os.environ.get("WORKFLOW_AUTO_TOPUP", "100"))
 AUTO_POLL_S = float(os.environ.get("WORKFLOW_POLL_INTERVAL_S", "15"))
+MAX_UPLOAD = 200 * 1024 * 1024
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 _state: dict[str, Any] = {"wf": None, "client": None, "runner": None}
@@ -60,10 +63,7 @@ async def lifespan(_: FastAPI):
             while True:
                 await asyncio.sleep(AUTO_POLL_S)
                 try:
-                    r = await wf().poll_videos()
-                    if r["done"] or r["failed"]:
-                        log.info("auto poll: %d done, %d failed, %d running",
-                                 len(r["done"]), len(r["failed"]), len(r["running"]))
+                    await wf().poll_videos()
                 except Exception:
                     log.exception("auto poll failed")
         poller = asyncio.create_task(_loop())
@@ -77,7 +77,7 @@ async def lifespan(_: FastAPI):
             await client.aclose()
 
 
-app = FastAPI(title="刀徒工作流（内部自用）", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="短剧工作台（内部自用）", version="0.3.0", lifespan=lifespan)
 db.init()
 
 
@@ -101,6 +101,19 @@ async def _media_error(_: Request, e: media.MediaError):
     return JSONResponse(status_code=500, content={"error": {"message": str(e)}})
 
 
+async def _body(request: Request) -> bytes:
+    data = await request.body()
+    if len(data) > MAX_UPLOAD:
+        raise WorkflowError("文件太大（上限 200 MB）")
+    return data
+
+
+def _download(path: str, filename: str, background: BackgroundTasks) -> FileResponse:
+    background.add_task(lambda: os.path.exists(path) and os.remove(path))
+    return FileResponse(path, media_type="application/zip",
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"})
+
+
 # ---------------- 界面与素材 ----------------
 
 @app.get("/", include_in_schema=False)
@@ -121,7 +134,7 @@ async def healthz():
     except Exception as e:  # 聚合层没起来时也要能打开界面
         models, agg_ok = [], False
         log.warning("aggregator unreachable: %s", e)
-    return {"ok": True, "aggregator": agg_ok, "llm_mode": llm.mode(),
+    return {"ok": True, "version": app.version, "aggregator": agg_ok, "llm_mode": llm.mode(),
             "ffmpeg": bool(media.ffmpeg_bin()), "media_root": media.root(),
             "live_models": [m["id"] for m in models if m.get("live")]}
 
@@ -138,8 +151,19 @@ async def api_wallet():
 
 @app.get("/api/defaults")
 def api_defaults():
-    from .pipeline import DEFAULT_SETTINGS
     return DEFAULT_SETTINGS
+
+
+# ---------------- 通知 ----------------
+
+@app.get("/notifications")
+def notifications(limit: int = 50, unread_only: bool = False):
+    return wf().notifications(limit, unread_only)
+
+
+@app.post("/notifications/read")
+def notifications_read(body: dict | None = Body(default=None)):
+    return wf().mark_read((body or {}).get("ids"))
 
 
 # ---------------- 项目 ----------------
@@ -154,6 +178,11 @@ def list_projects():
     return {"items": wf().list()}
 
 
+@app.post("/projects/import")
+async def import_project(request: Request):
+    return wf().import_project(await _body(request))
+
+
 @app.get("/projects/{pid}")
 def get_project(pid: str):
     return wf().get(pid)
@@ -166,14 +195,49 @@ def delete_project(pid: str):
     return wf().delete(pid)
 
 
+@app.post("/projects/{pid}/pin")
+def pin_project(pid: str, pinned: bool = True):
+    return wf().set_pinned(pid, pinned)
+
+
+@app.post("/projects/{pid}/cover")
+async def project_cover(pid: str, request: Request, filename: str = "cover.png"):
+    return wf().set_cover(pid, await _body(request), filename)
+
+
+@app.get("/projects/{pid}/export")
+def export_project(pid: str, background: BackgroundTasks):
+    path, name = wf().export_project(pid)
+    return _download(path, name, background)
+
+
+@app.get("/projects/{pid}/download")
+def download(pid: str, background: BackgroundTasks, what: str = "videos", episode_no: int | None = None):
+    path, name = wf().build_zip(pid, what, episode_no)
+    return _download(path, name, background)
+
+
 @app.patch("/projects/{pid}/settings")
 def update_settings(pid: str, body: dict = Body(...)):
     return wf().update_settings(pid, body)
 
 
+# ---------------- 剧本 ----------------
+
 @app.post("/projects/{pid}/script")
 def set_script(pid: str, body: dict = Body(...)):
     return wf().set_script(pid, body.get("text", ""))
+
+
+@app.post("/projects/{pid}/script/upload")
+async def upload_script(pid: str, request: Request, filename: str = "script.txt", mode: str = "replace"):
+    return wf().import_script_file(pid, await _body(request), filename, mode)
+
+
+@app.post("/projects/{pid}/script/generate")
+async def generate_script(pid: str, body: dict = Body(...)):
+    return await wf().generate_script(pid, body.get("idea", ""), int(body.get("episodes") or 3),
+                                      body.get("mode") or "replace", int(body.get("seconds_per_ep") or 90))
 
 
 @app.post("/projects/{pid}/parse")
@@ -184,19 +248,39 @@ def parse(pid: str, force: bool = False):
 # ---------------- 资产 ----------------
 
 @app.post("/projects/{pid}/assets/extract")
-async def extract_assets(pid: str):
-    return await wf().extract_assets(pid)
+async def extract_assets(pid: str, engine: str | None = None):
+    return await wf().extract_assets(pid, engine)
 
 
 @app.post("/projects/{pid}/assets")
 def add_asset(pid: str, body: dict = Body(...)):
-    return wf().add_asset(pid, body.get("kind", "character"), body.get("name", ""),
-                          body.get("description", ""), body.get("aliases") or [])
+    return wf().add_asset(pid, body.get("kind", "character"), body.get("name", ""), body.get("description", ""),
+                          body.get("aliases") or [], body.get("forms") or [])
 
 
 @app.post("/projects/{pid}/assets/images")
-async def asset_images(pid: str, only_missing: bool = True):
-    return await wf().gen_asset_images(pid, only_missing)
+async def asset_images(pid: str, only_missing: bool = True, kind: str | None = None):
+    return await wf().gen_asset_images(pid, only_missing, [kind] if kind else None)
+
+
+@app.post("/projects/{pid}/assets/bulk-upload")
+async def assets_bulk_upload(pid: str, request: Request, filename: str = "assets.zip"):
+    """批量上传：一个 zip（里面的文件按「资产名.png」「资产名-形态.png」命名），或单个文件。"""
+    import io
+    import zipfile
+    data = await _body(request)
+    files = []
+    if filename.lower().endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            files = [(n, z.read(n)) for n in z.namelist() if not n.endswith("/")]
+    else:
+        files = [(filename, data)]
+    return wf().bulk_upload(pid, files)
+
+
+@app.get("/assets/{aid}")
+def get_asset(aid: str):
+    return wf().asset(aid)
 
 
 @app.patch("/assets/{aid}")
@@ -210,17 +294,18 @@ def delete_asset(aid: str):
 
 
 @app.post("/assets/{aid}/image")
-async def asset_image(aid: str):
-    return await wf().gen_asset_image(aid)
+async def asset_image(aid: str, form_id: str | None = None):
+    return await wf().gen_asset_image(aid, form_id)
+
+
+@app.post("/assets/{aid}/polish")
+async def asset_polish(aid: str):
+    return await wf().polish_asset(aid)
 
 
 @app.post("/assets/{aid}/upload")
 async def asset_upload(aid: str, request: Request, filename: str = "upload.png"):
-    """请求体直接放图片二进制（不依赖 multipart）。"""
-    data = await request.body()
-    if len(data) > 20 * 1024 * 1024:
-        raise WorkflowError("图片不能超过 20 MB")
-    return wf().upload_asset_image(aid, data, filename)
+    return wf().upload_asset_image(aid, await _body(request), filename)
 
 
 @app.post("/assets/{aid}/select")
@@ -228,16 +313,91 @@ def asset_select(aid: str, version: int):
     return wf().select_asset_version(aid, version)
 
 
-# ---------------- 分镜 / 分镜图 ----------------
+@app.post("/assets/{aid}/forms")
+def add_form(aid: str, body: dict = Body(...)):
+    return wf().add_form(aid, body.get("name", ""), body.get("description", ""))
+
+
+@app.patch("/forms/{fid}")
+def edit_form(fid: str, body: dict = Body(...)):
+    return wf().edit("form", fid, body.get("fields") or {}, body.get("expected_rev"))
+
+
+@app.delete("/forms/{fid}")
+def delete_form(fid: str):
+    return wf().delete_form(fid)
+
+
+@app.post("/forms/{fid}/image")
+async def form_image(fid: str):
+    return await wf().gen_form_image(fid)
+
+
+@app.post("/forms/{fid}/edit-image")
+async def form_edit_image(fid: str, body: dict = Body(...)):
+    return await wf().edit_form_image(fid, body.get("instruction", ""))
+
+
+@app.post("/forms/{fid}/upload")
+async def form_upload(fid: str, request: Request, filename: str = "upload.png"):
+    return wf().upload_form_media(fid, await _body(request), filename)
+
+
+@app.post("/forms/{fid}/select")
+def form_select(fid: str, version: int):
+    return wf().select_version(fid, version)
+
+
+# ---------------- 素材 ----------------
+
+@app.post("/projects/{pid}/materials")
+async def upload_material(pid: str, request: Request, filename: str = "material.png", name: str = ""):
+    return wf().upload_material(pid, await _body(request), filename, name)
+
+
+@app.delete("/materials/{mid}")
+def delete_material(mid: str):
+    return wf().delete_material(mid)
+
+
+@app.post("/jobs/{jid}/extract-voice")
+async def extract_voice(jid: str, body: dict = Body(...)):
+    return await wf().extract_voice(jid, body.get("character", ""), float(body.get("start") or 0),
+                                    float(body.get("seconds") or 5))
+
+
+# ---------------- 分镜 / 站位图 / 分镜图 ----------------
 
 @app.post("/projects/{pid}/storyboard")
-async def storyboard(pid: str, episode_no: int | None = None, force: bool = False, max_shots: int | None = None):
-    return await wf().storyboard(pid, episode_no, force, max_shots)
+async def storyboard(pid: str, episode_no: int | None = None, force: bool = False, max_shots: int | None = None,
+                     engine: str | None = None):
+    return await wf().storyboard(pid, episode_no, force, max_shots, engine)
+
+
+@app.post("/projects/{pid}/shots")
+def add_shot(pid: str, body: dict = Body(...)):
+    return wf().add_shot(pid, int(body.get("episode_no") or 1), body.get("after_shot_no"), body.get("fields"))
 
 
 @app.patch("/shots/{sid}")
 def edit_shot(sid: str, body: dict = Body(...)):
     return wf().edit("shot", sid, body.get("fields") or {}, body.get("expected_rev"))
+
+
+@app.delete("/shots/{sid}")
+def delete_shot(sid: str):
+    return wf().delete_shot(sid)
+
+
+@app.patch("/scenes/{scid}")
+def edit_scene(scid: str, body: dict = Body(...)):
+    return wf().edit("scene", scid, body.get("fields") or {}, body.get("expected_rev"))
+
+
+@app.post("/projects/{pid}/blocking")
+async def blocking(pid: str, body: dict | None = Body(default=None)):
+    body = body or {}
+    return await wf().gen_blocking(pid, body.get("scene_ids"), body.get("only_missing", True), body.get("episode_no"))
 
 
 @app.post("/projects/{pid}/frames")
@@ -249,9 +409,17 @@ async def frames(pid: str, body: dict | None = Body(default=None)):
 # ---------------- 提示词 ----------------
 
 @app.post("/projects/{pid}/prompts")
-async def prompts(pid: str, force: bool = False, body: dict | None = Body(default=None)):
+async def prompts(pid: str, force: bool = False, episode_no: int | None = None, engine: str | None = None,
+                  body: dict | None = Body(default=None)):
     body = body or {}
-    return await wf().prompts(pid, force or bool(body.get("force")), body.get("shot_ids"))
+    return await wf().prompts(pid, force or bool(body.get("force")), body.get("shot_ids"),
+                              episode_no if episode_no is not None else body.get("episode_no"),
+                              engine or body.get("engine"))
+
+
+@app.post("/projects/{pid}/prompts/from-script")
+async def prompts_from_script(pid: str, episode_no: int | None = None):
+    return await wf().prompts_from_script(pid, episode_no)
 
 
 @app.patch("/prompts/{prid}")
@@ -268,8 +436,11 @@ def resolve_references(pid: str):
 
 def _video_args(body: dict | None, force: bool, resolution: str | None) -> dict:
     body = body or {}
+    dur = body.get("duration")
     return {"shot_ids": body.get("shot_ids"), "force": force or bool(body.get("force")),
-            "resolution": body.get("resolution") or resolution, "model": body.get("model")}
+            "resolution": body.get("resolution") or resolution, "model": body.get("model"),
+            "duration": float(dur) if dur not in (None, "", "shot") else None,
+            "episode_no": body.get("episode_no")}
 
 
 @app.post("/projects/{pid}/videos/quote")
@@ -281,8 +452,10 @@ async def videos_quote(pid: str, force: bool = False, resolution: str | None = N
 @app.post("/projects/{pid}/videos")
 async def videos(pid: str, force: bool = False, resolution: str | None = None,
                  body: dict | None = Body(default=None)):
-    args = _video_args(body, force, resolution)
-    return await wf().submit_videos(pid, mode=(body or {}).get("mode"), **args)
+    body = body or {}
+    return await wf().submit_videos(pid, mode=body.get("mode"), aspect_ratio=body.get("aspect_ratio"),
+                                    form_ids=body.get("form_ids"), material_ids=body.get("material_ids"),
+                                    **_video_args(body, force, resolution))
 
 
 @app.post("/projects/{pid}/videos/poll")
@@ -308,11 +481,49 @@ async def assemble(pid: str, episode_no: int | None = None, allow_partial: bool 
     return await wf().assemble(pid, episode_no, allow_partial)
 
 
+# ---------------- AI 对话 ----------------
+
+@app.get("/chat/agents")
+def chat_agents():
+    return {"items": wf().chat_agents()}
+
+
+@app.get("/chat/sessions")
+def chat_sessions(project_id: str | None = None):
+    return {"items": wf().chat_list(project_id)}
+
+
+@app.post("/chat/sessions")
+def chat_create(body: dict = Body(...)):
+    return wf().chat_create(body.get("agent", "assistant"), body.get("project_id") or "", body.get("title") or "",
+                            body.get("model") or "")
+
+
+@app.get("/chat/sessions/{sid}")
+def chat_get(sid: str):
+    return wf().chat_get(sid)
+
+
+@app.delete("/chat/sessions/{sid}")
+def chat_delete(sid: str):
+    return wf().chat_delete(sid)
+
+
+@app.delete("/chat/sessions")
+def chat_clear():
+    return wf().chat_delete(None)
+
+
+@app.post("/chat/sessions/{sid}/messages")
+async def chat_send(sid: str, body: dict = Body(...)):
+    return await wf().chat_send(sid, body.get("content", ""), body.get("model"))
+
+
 # ---------------- 一键（后台任务） ----------------
 
 @app.post("/projects/{pid}/run")
 async def run_all(pid: str, resolution: str | None = None, wait: bool = False):
-    """一键：分集 → 资产 → 参考图 → 分镜 → (分镜图) → 提示词 → 预算内提交视频 → 等出片 → 合成。
+    """一键成片：分集 → 资产 → 参考图 → 分镜 → 站位图 → (分镜图) → 提示词 → 预算内提交视频 → 等出片 → 合成。
     默认放后台，返回任务；wait=true 时同步跑完再返回（脚本用）。"""
     p = wf().get(pid)
     if not p["script_text"].strip():
@@ -333,7 +544,3 @@ def list_tasks(pid: str):
 @app.get("/tasks/{tid}")
 def get_task(tid: str):
     return runner().get(tid)
-
-
-# 兼容：Conflict 需要 409 + 细节
-__all__ = ["app", "configure", "Conflict"]

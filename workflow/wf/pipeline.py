@@ -1,22 +1,24 @@
-"""工作流编排：剧本 → 分集 → 资产(参考图) → 分镜(站位) → 分镜图 → 提示词(@绑定) → 视频(多版本) → 成片。"""
+"""工作流编排（核心）：项目 → 剧本 → 分集/场次 → 资产 → 分镜 → 站位图 → 提示词(@绑定) → 视频 → 成片。
+
+资产/出图在 assets_ops.py，视频/成片在 video_ops.py，对话/通知/导入导出/剧本文件在 extras.py。
+"""
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import re
 import sqlite3
-import uuid
 
 from . import db, llm, media, refs
 from .agg import Agg, AggError
+from .assets_ops import AssetsMixin
+from .errors import BudgetExceeded, Conflict, NotFound, WorkflowError  # noqa: F401  (re-export)
+from .extras import ExtrasMixin
+from .util import new_id, short_hash
+from .video_ops import ACTIVE_JOB, VideoMixin
 
 log = logging.getLogger("workflow.pipeline")
-
-CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-ACTIVE_JOB = ("submitted", "running")
-ASSET_KINDS = ("character", "scene", "prop")
 
 DEFAULT_SETTINGS = {
     "aspect_ratio": "9:16",
@@ -25,58 +27,41 @@ DEFAULT_SETTINGS = {
     "video_model": os.environ.get("WORKFLOW_VIDEO_MODEL", "seedance-2.5"),
     "resolution": os.environ.get("WORKFLOW_RESOLUTION", "480P"),
     "video_mode": "auto",            # auto | text | first_frame | reference
-    "max_shots": 8,
+    "engine": "auto",                # auto（有模型用模型）| local（只用本地规则，零成本）
+    "shot_seconds": 12,              # 每张视频卡的目标时长（会被视频模型的时长范围约束）
+    "max_shots": 30,                 # 每集最多卡片数
+    "prompt_format": "text",         # text | json
+    "image_resolution": "2K",        # 1K | 2K | 4K
     "budget_rmb": float(os.environ.get("WORKFLOW_BUDGET_RMB", "50")),
     "gen_asset_images": True,
+    "gen_blocking": True,            # 一键时每个场次生成站位图
+    "use_blocking_ref": True,        # 出片时把站位图作为参考图
     "gen_frames": False,
     "auto_assemble": True,
     "burn_subtitles": False,
 }
 SETTING_TYPES = {k: type(v) for k, v in DEFAULT_SETTINGS.items()}
+CHOICES = {"video_mode": ("auto", "text", "first_frame", "reference"), "engine": ("auto", "local"),
+           "prompt_format": ("text", "json"), "image_resolution": ("1K", "2K", "4K"),
+           "aspect_ratio": ("9:16", "16:9", "1:1", "3:4", "4:3")}
 
 EDITABLE = {
-    "shot": {"duration_s", "scene", "size", "angle", "movement", "picture", "blocking", "dialogue", "sfx",
-             "characters", "scene_asset"},
+    "shot": {"duration_s", "scene", "size", "angle", "movement", "picture", "performance", "blocking",
+             "dialogue", "sfx", "transition", "characters", "scene_asset"},
     "prompt": {"positive", "negative"},
-    "asset": {"name", "aliases", "description"},
+    "asset": {"name", "aliases", "description", "notes"},
+    "form": {"name", "description"},
+    "scene": {"location", "blocking_note"},
 }
-TABLE = {"shot": "shots", "prompt": "prompts", "asset": "assets"}
+TABLE = {"shot": "shots", "prompt": "prompts", "asset": "assets", "form": "asset_forms", "scene": "scenes"}
 JSON_FIELDS = {"characters": "characters_json", "aliases": "aliases_json"}
 
 
-class WorkflowError(Exception):
-    status = 400
+_id = new_id
+_h = short_hash
 
 
-class NotFound(WorkflowError):
-    status = 404
-
-
-class Conflict(WorkflowError):
-    status = 409
-
-    def __init__(self, message: str, detail: dict):
-        super().__init__(message)
-        self.detail = detail
-
-
-class BudgetExceeded(WorkflowError):
-    status = 402
-
-    def __init__(self, message: str, detail: dict):
-        super().__init__(message)
-        self.detail = detail
-
-
-def _id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:12]}"
-
-
-def _h(*parts) -> str:
-    return hashlib.sha256("|".join(str(p) for p in parts).encode()).hexdigest()[:24]
-
-
-class Workflow:
+class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
     def __init__(self, agg: Agg, auto_topup_rmb: float = 0.0):
         self.agg = agg
         self.auto_topup_rmb = auto_topup_rmb
@@ -84,7 +69,7 @@ class Workflow:
         self._poll_lock: asyncio.Lock | None = None
 
     # ==================================================================
-    # 基础：项目 / 设置 / 状态
+    # 项目 / 设置 / 状态
     # ==================================================================
 
     def create(self, name: str, style: str = "真人", settings: dict | None = None) -> dict:
@@ -96,17 +81,30 @@ class Workflow:
             c.execute("INSERT INTO projects(id,name,style,status,settings_json,created_at,updated_at) "
                       "VALUES(?,?,?,?,?,?,?)", (pid, name.strip(), style or "真人", "draft", db.dump(merged),
                                                 db.now(), db.now()))
+        self.notify(pid, "info", f"新建项目：{name.strip()}")
         return self.get(pid)
 
     def list(self) -> list[dict]:
         with db.tx() as c:
             rows = [dict(r) for r in c.execute(
-                "SELECT p.id, p.name, p.style, p.status, p.created_at, p.updated_at,"
+                "SELECT p.id, p.name, p.style, p.status, p.pinned, p.cover_path, p.created_at, p.updated_at,"
                 " (SELECT COUNT(*) FROM episodes e WHERE e.project_id=p.id) episodes,"
                 " (SELECT COUNT(*) FROM shots s WHERE s.project_id=p.id) shots,"
-                " (SELECT COUNT(*) FROM assets a WHERE a.project_id=p.id) assets"
-                " FROM projects p ORDER BY p.created_at DESC").fetchall()]
+                " (SELECT COUNT(*) FROM assets a WHERE a.project_id=p.id) assets,"
+                " (SELECT COUNT(*) FROM episodes e WHERE e.project_id=p.id AND e.final_path!='') finals"
+                " FROM projects p ORDER BY p.pinned DESC, p.updated_at DESC").fetchall()]
+            for r in rows:
+                r["cover_url"] = media.url_of(r.pop("cover_path")) or self._auto_cover(c, r["id"])
         return rows
+
+    @staticmethod
+    def _auto_cover(c, pid: str) -> str:
+        row = c.execute(
+            "SELECT v.local_path FROM asset_versions v JOIN assets a ON a.id=v.asset_id "
+            "JOIN asset_forms f ON f.id=v.form_id AND f.current_version=v.version "
+            "WHERE a.project_id=? AND a.kind IN ('character','scene') AND v.media_type='image' AND v.local_path!='' "
+            "ORDER BY CASE a.kind WHEN 'character' THEN 0 ELSE 1 END, a.created_at LIMIT 1", (pid,)).fetchone()
+        return media.url_of(row["local_path"]) if row else ""
 
     def delete(self, pid: str) -> dict:
         self._project_row(pid)
@@ -114,7 +112,14 @@ class Workflow:
             c.execute("DELETE FROM projects WHERE id=?", (pid,))
             c.execute("DELETE FROM tasks WHERE project_id=?", (pid,))
             c.execute("DELETE FROM changes WHERE project_id=?", (pid,))
+            c.execute("DELETE FROM chat_sessions WHERE project_id=?", (pid,))
         return {"deleted": pid}
+
+    def set_pinned(self, pid: str, pinned: bool) -> dict:
+        self._project_row(pid)
+        with db.tx() as c:
+            c.execute("UPDATE projects SET pinned=? WHERE id=?", (1 if pinned else 0, pid))
+        return {"id": pid, "pinned": pinned}
 
     def settings(self, pid: str) -> dict:
         p = self._project_row(pid)
@@ -125,12 +130,12 @@ class Workflow:
         unknown = set(patch) - set(DEFAULT_SETTINGS) - {"style", "name"}
         if unknown:
             raise WorkflowError(f"未知设置项：{', '.join(sorted(unknown))}")
+        merged = self._clean_settings({**cur, **{k: v for k, v in patch.items() if k in DEFAULT_SETTINGS}})
         with db.tx() as c:
             if "name" in patch and str(patch["name"]).strip():
                 c.execute("UPDATE projects SET name=? WHERE id=?", (str(patch["name"]).strip(), pid))
             if "style" in patch and str(patch["style"]).strip():
                 c.execute("UPDATE projects SET style=? WHERE id=?", (str(patch["style"]).strip(), pid))
-            merged = self._clean_settings({**cur, **{k: v for k, v in patch.items() if k in DEFAULT_SETTINGS}})
             c.execute("UPDATE projects SET settings_json=?, updated_at=? WHERE id=?",
                       (db.dump(merged), db.now(), pid))
         return self.get(pid)
@@ -149,11 +154,14 @@ class Workflow:
             except (TypeError, ValueError):
                 raise WorkflowError(f"设置项 {k} 类型不对：{v!r}")
             out[k] = v
-        if out["video_mode"] not in ("auto", "text", "first_frame", "reference"):
-            raise WorkflowError("video_mode 只能是 auto/text/first_frame/reference")
-        out["max_shots"] = max(1, min(40, out["max_shots"]))
-        out["budget_rmb"] = max(0.0, out["budget_rmb"])
         out["resolution"] = out["resolution"].upper()
+        out["image_resolution"] = out["image_resolution"].upper()
+        for k, allowed in CHOICES.items():
+            if out[k] not in allowed:
+                raise WorkflowError(f"{k} 只能是 {'/'.join(allowed)}")
+        out["max_shots"] = max(1, min(80, out["max_shots"]))
+        out["shot_seconds"] = max(2, min(30, out["shot_seconds"]))
+        out["budget_rmb"] = max(0.0, out["budget_rmb"])
         return out
 
     def _project_row(self, pid: str):
@@ -169,6 +177,9 @@ class Workflow:
         with db.tx() as c:
             eps = [dict(r) for r in c.execute(
                 "SELECT * FROM episodes WHERE project_id=? ORDER BY no", (pid,)).fetchall()]
+            scenes = [dict(r) for r in c.execute(
+                "SELECT sc.*, e.no episode_no FROM scenes sc JOIN episodes e ON e.id=sc.episode_id "
+                "WHERE sc.project_id=? ORDER BY e.no, sc.no", (pid,)).fetchall()]
             assets = self._assets(c, pid)
             shots = [dict(r) for r in c.execute(
                 "SELECT s.*, e.no episode_no FROM shots s JOIN episodes e ON e.id=s.episode_id "
@@ -179,62 +190,58 @@ class Workflow:
             for r in c.execute("SELECT j.* FROM jobs j JOIN shots s ON s.id=j.shot_id WHERE s.project_id=? "
                                "ORDER BY j.version", (pid,)).fetchall():
                 jobs.setdefault(r["shot_id"], []).append(self._job_view(dict(r)))
+            materials = [self._material_view(dict(r)) for r in c.execute(
+                "SELECT * FROM materials WHERE project_id=? ORDER BY created_at DESC", (pid,)).fetchall()]
             task = c.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
                              (pid,)).fetchone()
-        by_id = {a["id"]: a for a in assets}
-        for e in eps:
-            e["final_url"] = media.url_of(e["final_path"])
-            e["srt_url"] = media.url_of(e["srt_path"])
+        forms_by_id = {f["id"]: f for a in assets for f in a["forms"]}
+        scene_by_id = {s["id"]: s for s in scenes}
+        for s in scenes:
+            s["blocking"] = media.url_of(s["blocking_path"]) or s["blocking_url"]
+            s["characters"] = []
         for s in shots:
             s["characters"] = db.load(s.pop("characters_json"), [])
+            s["code"] = f"{s['episode_no']}-{s['shot_no']}"
             s["frame"] = media.url_of(s["frame_path"]) or s["frame_url"]
+            sc = scene_by_id.get(s["scene_id"])
+            s["scene_code"] = sc["code"] if sc else ""
+            s["blocking_image"] = sc["blocking"] if sc else ""
+            if sc:
+                for ch in s["characters"]:
+                    base = re.sub(r"[（(].*$", "", ch)
+                    if base not in sc["characters"]:
+                        sc["characters"].append(base)
             pr = prompts.get(s["id"])
             if pr:
                 pr["bindings"] = db.load(pr.pop("bindings_json"), [])
                 pr["unresolved"] = db.load(pr.pop("unresolved_json"), [])
-                pr["stale"] = refs.stale(pr["bindings"], by_id)
+                pr["stale"] = refs.stale(pr["bindings"], forms_by_id)
             s["prompt"] = pr
             s["jobs"] = jobs.get(s["id"], [])
             s["job"] = next((j for j in s["jobs"] if j["id"] == s["selected_job_id"]), None) \
                 or (s["jobs"][-1] if s["jobs"] else None)
-        out = {**p, "settings": settings, "episodes": eps, "assets": assets, "shots": shots,
-               "spend": self._spend(pid), "task": self._task_view(dict(task)) if task else None}
-        return out
-
-    @staticmethod
-    def _job_view(j: dict) -> dict:
-        j["refs"] = db.load(j.pop("refs_json"), [])
-        j["play_url"] = media.url_of(j["local_path"]) or ("" if media.is_mock_url(j["url"]) else j["url"])
-        return j
+        kinds = {"character": "characters", "scene": "scenes", "prop": "props", "creature": "creatures"}
+        for e in eps:
+            e["final_url"] = media.url_of(e["final_path"])
+            e["srt_url"] = media.url_of(e["srt_path"])
+            e["scenes"] = sum(1 for s in scenes if s["episode_id"] == e["id"])
+            e_shots = [s for s in shots if s["episode_id"] == e["id"]]
+            e["shots"] = len(e_shots)
+            e["prompts"] = sum(1 for s in e_shots if s["prompt"])
+            e["videos_done"] = sum(1 for s in e_shots if s["job"] and s["job"]["status"] == "succeeded")
+            e["stats"] = {v: 0 for v in kinds.values()}
+            for a in assets:
+                if a["kind"] in kinds and e["no"] in a["episodes"]:
+                    e["stats"][kinds[a["kind"]]] += 1
+        return {**p, "cover_url": media.url_of(p.pop("cover_path")), "settings": settings, "episodes": eps,
+                "scenes": scenes, "assets": assets, "shots": shots, "materials": materials,
+                "spend": self._spend(pid), "task": self._task_view(dict(task)) if task else None}
 
     @staticmethod
     def _task_view(t: dict) -> dict:
         t["steps"] = db.load(t.pop("steps_json"), [])
         t["result"] = db.load(t.pop("result_json"), {})
         return t
-
-    def _assets(self, c, pid: str) -> list[dict]:
-        rows = [dict(r) for r in c.execute(
-            "SELECT * FROM assets WHERE project_id=? ORDER BY CASE kind WHEN 'character' THEN 0 "
-            "WHEN 'scene' THEN 1 ELSE 2 END, created_at", (pid,)).fetchall()]
-        if not rows:
-            return []
-        vers: dict[str, list[dict]] = {}
-        q = ",".join("?" * len(rows))
-        for v in c.execute(f"SELECT * FROM asset_versions WHERE asset_id IN ({q}) ORDER BY version",
-                           [r["id"] for r in rows]).fetchall():
-            v = dict(v)
-            v["display_url"] = media.url_of(v["local_path"]) or ("" if media.is_mock_url(v["image_url"])
-                                                                 else v["image_url"])
-            vers.setdefault(v["asset_id"], []).append(v)
-        for a in rows:
-            a["aliases"] = db.load(a.pop("aliases_json"), [])
-            a["versions"] = vers.get(a["id"], [])
-            cur = next((v for v in a["versions"] if v["version"] == a["current_version"]), None)
-            a["image_url"] = cur["image_url"] if cur else ""
-            a["local_path"] = cur["local_path"] if cur else ""
-            a["display_url"] = cur["display_url"] if cur else ""
-        return rows
 
     def _spend(self, pid: str) -> dict:
         with db.tx() as c:
@@ -247,9 +254,12 @@ class Workflow:
                 "WHERE a.project_id=?", (pid,)).fetchone()["v"]
             frames = c.execute("SELECT COALESCE(SUM(frame_charged_rmb),0) v FROM shots WHERE project_id=?",
                                (pid,)).fetchone()["v"]
+            blocks = c.execute("SELECT COALESCE(SUM(blocking_charged_rmb),0) v FROM scenes WHERE project_id=?",
+                               (pid,)).fetchone()["v"]
         budget = float(self.settings(pid)["budget_rmb"])
-        total = round(float(jobs) + float(imgs) + float(frames), 4)
-        return {"videos_rmb": round(float(jobs), 4), "images_rmb": round(float(imgs) + float(frames), 4),
+        images = float(imgs) + float(frames) + float(blocks)
+        total = round(float(jobs) + images, 4)
+        return {"videos_rmb": round(float(jobs), 4), "images_rmb": round(images, 4),
                 "total_rmb": total, "budget_rmb": budget, "remaining_rmb": round(budget - total, 4)}
 
     def refresh_status(self, pid: str) -> str:
@@ -258,7 +268,7 @@ class Workflow:
             eps = c.execute("SELECT COUNT(*) n, SUM(CASE WHEN final_path!='' THEN 1 ELSE 0 END) f "
                             "FROM episodes WHERE project_id=?", (pid,)).fetchone()
             n_assets = c.execute("SELECT COUNT(*) n FROM assets WHERE project_id=?", (pid,)).fetchone()["n"]
-            p = c.execute("SELECT status, script_text FROM projects WHERE id=?", (pid,)).fetchone()
+            p = c.execute("SELECT script_text FROM projects WHERE id=?", (pid,)).fetchone()
             if not p:
                 return ""
             if eps["n"] and eps["f"] == eps["n"]:
@@ -283,7 +293,7 @@ class Workflow:
         return status
 
     # ==================================================================
-    # 剧本 / 分集
+    # 剧本 / 分集 / 场次
     # ==================================================================
 
     def set_script(self, pid: str, text: str) -> dict:
@@ -293,7 +303,20 @@ class Workflow:
         with db.tx() as c:
             c.execute("UPDATE projects SET script_text=?, updated_at=? WHERE id=?", (text, db.now(), pid))
         self.refresh_status(pid)
-        return self.get(pid)
+        out = self.get(pid)
+        out["script_check"] = self.script_check(text)
+        return out
+
+    def script_check(self, text: str) -> dict:
+        eps = self.split_episodes(text)
+        marked = bool(re.search(r"(?m)^\s*(?:第\s*[0-9一二三四五六七八九十百]+\s*集|EP\s*\d+)", text, re.I))
+        n_scenes = sum(len(llm.split_scenes(i + 1, body)) for i, (_, body) in enumerate(eps))
+        warnings = []
+        if not marked:
+            warnings.append("未检测到明确分集标题（将按 1 集处理）")
+        if not any(llm.scene_heading(ln) for ln in text.splitlines()):
+            warnings.append("未检测到场次标题（如“1-1 日 外 金鸡岭”），每集按一场处理")
+        return {"chars": len(text), "episodes": len(eps), "scenes": n_scenes, "warnings": warnings}
 
     def parse(self, pid: str, force: bool = False) -> dict:
         p = self._project_row(pid)
@@ -302,15 +325,23 @@ class Workflow:
         with db.tx() as c:
             n = c.execute("SELECT COUNT(*) n FROM shots WHERE project_id=?", (pid,)).fetchone()["n"]
         if n and not force:
-            raise WorkflowError("已经有分镜了；重新分集会清空分镜和视频，确认请加 force=true")
+            raise WorkflowError("已经有分镜了；重新解析会清空旧分镜、提示词和视频任务，确认请勾选后再解析（force=true）")
         parts = self.split_episodes(p["script_text"])
         with db.tx() as c:
             c.execute("DELETE FROM episodes WHERE project_id=?", (pid,))
             for no, (title, body) in enumerate(parts, start=1):
+                eid = _id("ep")
                 c.execute("INSERT INTO episodes(id,project_id,no,title,raw_text) VALUES(?,?,?,?,?)",
-                          (_id("ep"), pid, no, title, body))
+                          (eid, pid, no, title, body))
+                for k, sc in enumerate(llm.split_scenes(no, body), start=1):
+                    c.execute("INSERT INTO scenes(id,project_id,episode_id,no,code,heading,location,time_of_day,text,"
+                              "updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                              (_id("scene"), pid, eid, k, sc["code"], sc["heading"], sc["location"],
+                               sc["time_of_day"], sc["text"], db.now()))
         self.refresh_status(pid)
-        return self.get(pid)
+        out = self.get(pid)
+        out["script_check"] = self.script_check(p["script_text"])
+        return out
 
     @staticmethod
     def split_episodes(text: str) -> list[tuple[str, str]]:
@@ -333,253 +364,127 @@ class Workflow:
             self.parse(pid)
 
     # ==================================================================
-    # 资产库
+    # 分镜（视频卡：按场次、按时间段）
     # ==================================================================
 
-    async def extract_assets(self, pid: str) -> dict:
-        p = self._project_row(pid)
-        if not p["script_text"].strip():
-            raise WorkflowError("剧本是空的")
-        st = self.settings(pid)
-        data, source = await llm.extract_assets(self.agg, p["script_text"], p["style"], st["text_model"])
-        added = []
-        with db.tx() as c:
-            existing = {(r["kind"], r["name"]) for r in c.execute(
-                "SELECT kind, name FROM assets WHERE project_id=?", (pid,))}
-            for key, kind in (("characters", "character"), ("scenes", "scene"), ("props", "prop")):
-                for a in data.get(key) or []:
-                    if (kind, a["name"]) in existing:
-                        continue
-                    aid = _id("asset")
-                    c.execute("INSERT INTO assets(id,project_id,kind,name,aliases_json,description,"
-                              "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                              (aid, pid, kind, a["name"], db.dump(a.get("aliases") or []),
-                               a.get("description") or "", db.now(), db.now()))
-                    added.append({"id": aid, "kind": kind, "name": a["name"]})
-        self.refresh_status(pid)
-        return {"source": source, "added": added, "state": self.get(pid)}
-
-    def add_asset(self, pid: str, kind: str, name: str, description: str = "",
-                  aliases: list[str] | None = None) -> dict:
-        self._project_row(pid)
-        if kind not in ASSET_KINDS:
-            raise WorkflowError(f"资产类型只能是 {'/'.join(ASSET_KINDS)}")
-        if not (name or "").strip():
-            raise WorkflowError("资产名不能为空")
-        aid = _id("asset")
-        with db.tx() as c:
-            if c.execute("SELECT 1 FROM assets WHERE project_id=? AND kind=? AND name=?",
-                         (pid, kind, name.strip())).fetchone():
-                raise WorkflowError(f"已有同名资产：{name}")
-            c.execute("INSERT INTO assets(id,project_id,kind,name,aliases_json,description,created_at,updated_at)"
-                      " VALUES(?,?,?,?,?,?,?,?)", (aid, pid, kind, name.strip(), db.dump(aliases or []),
-                                                   description, db.now(), db.now()))
-        self.refresh_status(pid)
-        return self.asset(aid)
-
-    def asset(self, aid: str) -> dict:
-        with db.tx() as c:
-            row = c.execute("SELECT project_id FROM assets WHERE id=?", (aid,)).fetchone()
-            if not row:
-                raise NotFound(f"资产不存在：{aid}")
-            return next(a for a in self._assets(c, row["project_id"]) if a["id"] == aid)
-
-    def delete_asset(self, aid: str) -> dict:
-        a = self.asset(aid)
-        with db.tx() as c:
-            c.execute("DELETE FROM assets WHERE id=?", (aid,))
-        return {"deleted": aid, "name": a["name"]}
-
-    async def gen_asset_image(self, aid: str) -> dict:
-        a = self.asset(aid)
-        p = self._project_row(a["project_id"])
-        st = self.settings(a["project_id"])
-        prompt = llm.asset_image_prompt(a["kind"], a["name"], a["description"], p["style"])
-        version = (max((v["version"] for v in a["versions"]), default=0)) + 1
-        size = "1024x1792" if a["kind"] == "character" else "1792x1024"
-        res = await self._with_topup(lambda: self.agg.image(st["image_model"], prompt, size=size,
-                                                            idem=f"asset:{aid}:v{version}"))
-        url = (res.get("data") or [{}])[0].get("url") or ""
-        local, source = await self._store_image(a["project_id"], "assets", f"{aid}_v{version}", url,
-                                                seed=f"{a['name']}{version}")
-        charged = float((res.get("billing") or {}).get("charged_rmb") or 0)
-        with db.tx() as c:
-            c.execute("INSERT INTO asset_versions(id,asset_id,version,prompt,image_url,local_path,source,"
-                      "charged_rmb,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                      (_id("av"), aid, version, prompt, "" if url.startswith("data:") else url, local, source,
-                       charged, db.now()))
-            c.execute("UPDATE assets SET current_version=?, updated_at=? WHERE id=?", (version, db.now(), aid))
-        return self.asset(aid)
-
-    async def gen_asset_images(self, pid: str, only_missing: bool = True) -> dict:
-        with db.tx() as c:
-            todo = [r["id"] for r in c.execute(
-                "SELECT id FROM assets WHERE project_id=?" + (" AND current_version=0" if only_missing else ""),
-                (pid,)).fetchall()]
-        done, failed = [], []
-        for aid in todo:
-            try:
-                a = await self.gen_asset_image(aid)
-                done.append({"id": aid, "name": a["name"], "version": a["current_version"]})
-            except (AggError, media.MediaError, WorkflowError) as e:
-                failed.append({"id": aid, "error": str(e)[:200]})
-        return {"generated": done, "failed": failed}
-
-    def upload_asset_image(self, aid: str, data: bytes, filename: str = "upload.png") -> dict:
-        a = self.asset(aid)
-        if not data:
-            raise WorkflowError("上传的文件是空的")
-        ext = os.path.splitext(filename)[1].lower() or ".png"
-        if ext not in (".png", ".jpg", ".jpeg", ".webp"):
-            raise WorkflowError("只支持 png/jpg/webp")
-        version = (max((v["version"] for v in a["versions"]), default=0)) + 1
-        path = media.path_for(a["project_id"], "assets", f"{aid}_v{version}{ext}")
-        with open(path, "wb") as f:
-            f.write(data)
-        with db.tx() as c:
-            c.execute("INSERT INTO asset_versions(id,asset_id,version,prompt,image_url,local_path,source,created_at)"
-                      " VALUES(?,?,?,?,?,?,?,?)", (_id("av"), aid, version, "", "", path, "uploaded", db.now()))
-            c.execute("UPDATE assets SET current_version=?, updated_at=? WHERE id=?", (version, db.now(), aid))
-        return self.asset(aid)
-
-    def select_asset_version(self, aid: str, version: int) -> dict:
-        a = self.asset(aid)
-        if not any(v["version"] == version for v in a["versions"]):
-            raise WorkflowError(f"没有这个版本：v{version}")
-        with db.tx() as c:
-            c.execute("UPDATE assets SET current_version=?, updated_at=? WHERE id=?", (version, db.now(), aid))
-        return self.asset(aid)
-
-    async def _store_image(self, pid: str, sub: str, stem: str, url: str, seed: str) -> tuple[str, str]:
-        """把上游图片落到本地。返回 (local_path, source)。mock URL 生成占位图。"""
-        if not url or media.is_mock_url(url):
-            path = media.path_for(pid, sub, stem + ".png")
-            media.placeholder_png(path, seed)
-            return path, "mock"
-        if url.startswith("data:"):
-            import base64
-            head, _, b64 = url.partition(",")
-            ext = ".jpg" if "jpeg" in head else ".png"
-            path = media.path_for(pid, sub, stem + ext)
-            with open(path, "wb") as f:
-                f.write(base64.b64decode(b64))
-            return path, "generated"
+    async def _duration_range(self, model_id: str) -> tuple[int, int]:
         try:
-            data = await self.agg.fetch(url)
-        except Exception as e:  # 下载失败不致命：保留上游 URL
-            log.warning("download image failed %s: %s", url[:80], e)
-            return "", "generated"
-        ext = ".jpg" if url.lower().split("?")[0].endswith((".jpg", ".jpeg")) else ".png"
-        path = media.path_for(pid, sub, stem + ext)
-        with open(path, "wb") as f:
-            f.write(data)
-        return path, "generated"
-
-    # ==================================================================
-    # 分镜（含站位）
-    # ==================================================================
+            d = (await self.model_info(model_id)).get("duration") or {}
+        except WorkflowError:
+            d = {}
+        return int(d.get("min", 4)), int(min(15, d.get("max", 15)))
 
     async def storyboard(self, pid: str, episode_no: int | None = None, force: bool = False,
-                         max_shots: int | None = None) -> dict:
+                         max_shots: int | None = None, engine: str | None = None) -> dict:
         self._ensure_parsed(pid)
         proj = self.get(pid)
         st = proj["settings"]
+        engine = engine or st["engine"]
         max_shots = max_shots or st["max_shots"]
+        lo, hi = await self._duration_range(st["video_model"])
+        target = max(lo, min(hi, st["shot_seconds"]))
         targets = [e for e in proj["episodes"] if episode_no is None or e["no"] == episode_no]
         if not targets:
             raise NotFound(f"第 {episode_no} 集不存在")
-        char_names = [a["name"] for a in proj["assets"] if a["kind"] == "character"]
-        scene_names = [a["name"] for a in proj["assets"] if a["kind"] == "scene"]
+        char_names = [a["name"] for a in proj["assets"] if a["kind"] in ("character", "creature")]
+        scene_assets = {a["name"] for a in proj["assets"] if a["kind"] == "scene"}
         results = []
         for ep in targets:
-            with db.tx() as c:
-                existing = c.execute("SELECT COUNT(*) n FROM shots WHERE episode_id=?", (ep["id"],)).fetchone()["n"]
-            if existing and not force:
-                results.append({"episode": ep["no"], "skipped": True, "shots": existing, "source": "cached"})
+            if ep["shots"] and not force:
+                results.append({"episode": ep["no"], "skipped": True, "shots": ep["shots"], "source": "cached"})
                 continue
-            shots, source = await llm.storyboard(self.agg, ep["raw_text"], proj["style"], st["text_model"],
-                                                 max_shots, char_names, scene_names)
+            scenes = [s for s in proj["scenes"] if s["episode_id"] == ep["id"]]
+            shots, source = await llm.storyboard(self.agg, scenes, proj["style"], st["text_model"], max_shots,
+                                                 char_names, lo, hi, target, engine)
             if not shots:
                 raise WorkflowError(f"第 {ep['no']} 集没拆出镜头")
+            by_code = {s["code"]: s for s in scenes}
             with db.tx() as c:
                 c.execute("DELETE FROM shots WHERE episode_id=?", (ep["id"],))
-                for s in shots:
-                    scene_asset = s["scene"] if s["scene"] in scene_names else ""
-                    c.execute("""INSERT INTO shots(id,project_id,episode_id,shot_no,duration_s,scene,size,angle,
-                                 movement,picture,blocking,dialogue,sfx,characters_json,scene_asset,status,updated_at)
-                                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                              (_id("shot"), pid, ep["id"], s["shot_no"], s["duration"], s["scene"], s["size"],
-                               s["angle"], s["movement"], s["picture"], s["blocking"], s["dialogue"], s["sfx"],
-                               db.dump(s["characters"]), scene_asset, "storyboard_ready", db.now()))
+                for n, s in enumerate(shots, start=1):
+                    sc = by_code.get(s["scene_code"]) or (scenes[0] if scenes else None)
+                    loc = sc["location"] if sc else ""
+                    scene_asset = loc if loc in scene_assets else ""
+                    c.execute("""INSERT INTO shots(id,project_id,episode_id,scene_id,shot_no,duration_s,scene,size,angle,
+                                 movement,picture,performance,blocking,dialogue,sfx,transition,original_text,
+                                 characters_json,scene_asset,status,source,updated_at)
+                                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              (_id("shot"), pid, ep["id"], sc["id"] if sc else "", n, s["duration"],
+                               loc or (sc["heading"] if sc else ""), s["size"], s["angle"], s["movement"],
+                               s["picture"], s["performance"], s["blocking"], s["dialogue"], s["sfx"],
+                               s["transition"], s.get("original_text", ""), db.dump(s["characters"]), scene_asset,
+                               "storyboard_ready", source, db.now()))
                 c.execute("UPDATE episodes SET final_path='', srt_path='', final_seconds=0 WHERE id=?", (ep["id"],))
             results.append({"episode": ep["no"], "shots": len(shots), "source": source})
         self.refresh_status(pid)
         return {"project": pid, "results": results, "state": self.get(pid)}
 
-    # ==================================================================
-    # 分镜图（站位图）
-    # ==================================================================
+    def add_shot(self, pid: str, episode_no: int, after_shot_no: int | None = None, fields: dict | None = None) -> dict:
+        """新增卡片：插在 after_shot_no 后面（不给就放最后），后面的卡片顺延编号。"""
+        fields = fields or {}
+        with db.tx() as c:
+            ep = c.execute("SELECT * FROM episodes WHERE project_id=? AND no=?", (pid, episode_no)).fetchone()
+            if not ep:
+                raise NotFound(f"第 {episode_no} 集不存在")
+            last = c.execute("SELECT COALESCE(MAX(shot_no),0) n FROM shots WHERE episode_id=?",
+                             (ep["id"],)).fetchone()["n"]
+            pos = last + 1 if after_shot_no is None else max(1, min(last + 1, int(after_shot_no) + 1))
+            c.execute("UPDATE shots SET shot_no=shot_no+1 WHERE episode_id=? AND shot_no>=?", (ep["id"], pos))
+            sc = c.execute("SELECT id, location FROM scenes WHERE episode_id=? ORDER BY no LIMIT 1",
+                           (ep["id"],)).fetchone()
+            sid = _id("shot")
+            c.execute("""INSERT INTO shots(id,project_id,episode_id,scene_id,shot_no,duration_s,scene,picture,dialogue,
+                         characters_json,status,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (sid, pid, ep["id"], fields.get("scene_id") or (sc["id"] if sc else ""), pos,
+                       float(fields.get("duration_s") or 5), fields.get("scene") or (sc["location"] if sc else ""),
+                       fields.get("picture") or "", fields.get("dialogue") or "",
+                       db.dump(fields.get("characters") or []), "storyboard_ready", "manual", db.now()))
+        self.refresh_status(pid)
+        return {"id": sid, "shot_no": pos}
 
-    def _ref_url(self, local_path: str, url: str) -> str:
-        """给上游的参考图：mock URL 原样；本地文件转 data URI（上游临时链接会过期）；否则用 URL。"""
-        if url and media.is_mock_url(url):
-            return url
-        if local_path and os.path.exists(local_path):
-            return media.data_uri(local_path)
-        return url
-
-    async def gen_frames(self, pid: str, shot_ids: list[str] | None = None, only_missing: bool = True) -> dict:
-        proj = self.get(pid)
-        st = proj["settings"]
-        assets = {a["name"]: a for a in proj["assets"]}
-        done, failed = [], []
-        for s in proj["shots"]:
-            if shot_ids and s["id"] not in shot_ids:
-                continue
-            if only_missing and s["frame"] and not shot_ids:
-                continue
-            ref_urls = []
-            for name in (s["characters"] or [])[:3] + ([s["scene_asset"]] if s["scene_asset"] else []):
-                a = assets.get(name)
-                if a and (a["local_path"] or a["image_url"]):
-                    ref_urls.append(self._ref_url(a["local_path"], a["image_url"]))
-            prompt = llm.frame_image_prompt(s, proj["style"], st["aspect_ratio"])
-            size = "1024x1792" if st["aspect_ratio"] == "9:16" else "1792x1024"
-            try:
-                res = await self._with_topup(lambda: self.agg.image(
-                    st["image_model"], prompt, size=size, refs=ref_urls or None,
-                    idem=f"frame:{s['id']}:{_h(prompt, len(ref_urls))}"))
-                url = (res.get("data") or [{}])[0].get("url") or ""
-                local, _ = await self._store_image(pid, "frames", f"{s['id']}_{_h(prompt)[:6]}", url,
-                                                   seed=s["id"])
-                charged = float((res.get("billing") or {}).get("charged_rmb") or 0)
-                with db.tx() as c:
-                    c.execute("UPDATE shots SET frame_url=?, frame_path=?, "
-                              "frame_charged_rmb=frame_charged_rmb+? WHERE id=?",
-                              ("" if url.startswith("data:") else url, local, charged, s["id"]))
-                done.append({"shot": s["id"], "episode": s["episode_no"], "shot_no": s["shot_no"]})
-            except (AggError, media.MediaError) as e:
-                failed.append({"shot": s["id"], "error": str(e)[:200]})
-        return {"generated": done, "failed": failed}
+    def delete_shot(self, sid: str) -> dict:
+        with db.tx() as c:
+            s = c.execute("SELECT * FROM shots WHERE id=?", (sid,)).fetchone()
+            if not s:
+                raise NotFound("镜头不存在")
+            if c.execute("SELECT 1 FROM jobs WHERE shot_id=? AND status IN ('submitted','running')", (sid,)).fetchone():
+                raise WorkflowError("这个镜头有视频在生成，先取消再删")
+            c.execute("DELETE FROM shots WHERE id=?", (sid,))
+            c.execute("UPDATE shots SET shot_no=shot_no-1 WHERE episode_id=? AND shot_no>?",
+                      (s["episode_id"], s["shot_no"]))
+        self.refresh_status(s["project_id"])
+        return {"deleted": sid}
 
     # ==================================================================
     # 提示词（@绑定）
     # ==================================================================
 
-    def _asset_index(self, pid: str) -> list[dict]:
-        with db.tx() as c:
-            return self._assets(c, pid)
+    def _voices(self, assets: list[dict]) -> dict[str, str]:
+        """角色 → 音色资产名。约定：音频资产叫「角色名音色」或「角色名声线」。"""
+        names = {a["name"] for a in assets if a["kind"] in ("character", "creature")}
+        out = {}
+        for a in assets:
+            if a["kind"] != "audio" or not a["current_version"]:
+                continue
+            base = re.sub(r"(音色|声线|配音)$", "", a["name"])
+            if base in names:
+                out[base] = a["name"]
+        return out
 
-    async def prompts(self, pid: str, force: bool = False, shot_ids: list[str] | None = None) -> dict:
+    async def prompts(self, pid: str, force: bool = False, shot_ids: list[str] | None = None,
+                      episode_no: int | None = None, engine: str | None = None) -> dict:
         proj = self.get(pid)
         st = proj["settings"]
+        engine = engine or st["engine"]
         shots = [s for s in proj["shots"] if (not shot_ids or s["id"] in shot_ids)
+                 and (episode_no is None or s["episode_no"] == episode_no)
                  and (force or shot_ids or not s.get("prompt"))]
         if not shots:
             return {"project": pid, "generated": 0, "source": "cached", "state": proj}
         names = [a["name"] for a in proj["assets"]]
-        data, source = await llm.prompts(self.agg, shots, proj["style"], st["text_model"],
-                                         st["aspect_ratio"], names)
+        data, source = await llm.prompts(self.agg, shots, proj["style"], st["text_model"], st["aspect_ratio"],
+                                         names, self._voices(proj["assets"]), st["prompt_format"],
+                                         st["video_model"], engine)
         assets = proj["assets"]
         with db.tx() as c:
             for shot, item in zip(shots, data):
@@ -602,9 +507,15 @@ class Workflow:
         self.refresh_status(pid)
         return {"project": pid, "generated": len(data), "source": source, "state": self.get(pid)}
 
+    async def prompts_from_script(self, pid: str, episode_no: int | None = None) -> dict:
+        """剧本直转提示词：没有分镜的集先用本地规则拆卡，再转提示词。"""
+        await self.storyboard(pid, episode_no, engine="local")
+        return await self.prompts(pid, episode_no=episode_no)
+
     def resolve_references(self, pid: str, shot_ids: list[str] | None = None) -> dict:
-        """按资产当前版本重算所有绑定（资产改名/换图后点一次）。系统字段，不推进 rev。"""
-        assets = self._asset_index(pid)
+        """按资产当前形态与版本重算所有绑定（资产改名/换图后点一次）。系统字段，不推进 rev。"""
+        with db.tx() as c:
+            assets = self._assets(c, pid)
         changed = 0
         with db.tx() as c:
             rows = c.execute("SELECT p.* FROM prompts p JOIN shots s ON s.id=p.shot_id WHERE s.project_id=?",
@@ -628,6 +539,16 @@ class Workflow:
         c.execute("INSERT INTO changes(project_id,object_type,object_id,rev,fields_json,actor,created_at)"
                   " VALUES(?,?,?,?,?,?,?)", (pid, kind, oid, rev, db.dump(sorted(fields)), actor, db.now()))
 
+    @staticmethod
+    def _owner_project(c, kind: str, row: dict) -> str:
+        if row.get("project_id"):
+            return row["project_id"]
+        if kind == "prompt":
+            return c.execute("SELECT project_id FROM shots WHERE id=?", (row["shot_id"],)).fetchone()["project_id"]
+        if kind == "form":
+            return c.execute("SELECT project_id FROM assets WHERE id=?", (row["asset_id"],)).fetchone()["project_id"]
+        raise WorkflowError("找不到所属项目")
+
     def edit(self, kind: str, oid: str, fields: dict, expected_rev: int | None = None) -> dict:
         """只有当"别人改过的字段"和"你这次要改的字段"重叠且值不同，才报冲突；否则自动合并。"""
         if kind not in EDITABLE:
@@ -641,8 +562,7 @@ class Workflow:
             if not row:
                 raise NotFound(f"{kind} 不存在：{oid}")
             row = dict(row)
-            pid = row.get("project_id") or c.execute(
-                "SELECT s.project_id FROM shots s WHERE s.id=?", (row.get("shot_id"),)).fetchone()["project_id"]
+            pid = self._owner_project(c, kind, row)
             current = {}
             for f in fields:
                 col = JSON_FIELDS.get(f, f)
@@ -658,9 +578,12 @@ class Workflow:
                     v = [str(x).strip() for x in (v or []) if str(x).strip()]
                 else:
                     v = str(v if v is not None else "")
+                if kind == "form" and f == "name" and row["name"] == "默认":
+                    raise WorkflowError("默认形态不能改名")
                 if v != current[f]:
                     new[f] = v
-            if expected_rev is not None and int(expected_rev) != row["rev"]:
+            merged = expected_rev is not None and int(expected_rev) != row["rev"]
+            if merged:
                 touched: set[str] = set()
                 for ch in c.execute("SELECT fields_json FROM changes WHERE object_id=? AND rev>?",
                                     (oid, int(expected_rev))).fetchall():
@@ -672,304 +595,20 @@ class Workflow:
                                     "yours": {f: new[f] for f in overlap}, "rev": row["rev"],
                                     "expected_rev": int(expected_rev)})
             if not new:
-                return {"changed": [], "rev": row["rev"], "merged": expected_rev is not None
-                        and int(expected_rev) != row["rev"]}
+                return {"changed": [], "rev": row["rev"], "merged": merged}
             rev = row["rev"] + 1
             sets = ", ".join(f"{JSON_FIELDS.get(f, f)}=?" for f in new)
             vals = [db.dump(v) if f in JSON_FIELDS else v for f, v in new.items()]
             try:
-                c.execute(f"UPDATE {table} SET {sets}, rev=?, updated_at=? WHERE id=?",
-                          vals + [rev, db.now(), oid])
+                c.execute(f"UPDATE {table} SET {sets}, rev=?, updated_at=? WHERE id=?", vals + [rev, db.now(), oid])
             except sqlite3.IntegrityError:
-                raise WorkflowError("和已有资产重名了")
+                raise WorkflowError("名字和已有的重复了")
             self._journal(c, pid, kind, oid, rev, list(new), "user")
             if kind == "prompt" and "positive" in new:
-                assets = self._assets(c, pid)
-                b, u = refs.resolve(new["positive"], assets)
+                b, u = refs.resolve(new["positive"], self._assets(c, pid))
                 c.execute("UPDATE prompts SET bindings_json=?, unresolved_json=? WHERE id=?",
                           (db.dump(b), db.dump(u), oid))
-        return {"changed": sorted(new), "rev": rev,
-                "merged": expected_rev is not None and int(expected_rev) != row["rev"]}
-
-    # ==================================================================
-    # 视频：报价 → 预算 → 提交（多版本、幂等）→ 回执 → 下载
-    # ==================================================================
-
-    async def model_info(self, model_id: str) -> dict:
-        if self._models is None or model_id not in self._models:
-            self._models = {m["id"]: m for m in await self.agg.models()}
-        m = self._models.get(model_id)
-        if not m:
-            raise WorkflowError(f"聚合层没有这个模型：{model_id}")
-        return m
-
-    def _clamp_duration(self, seconds: float, m: dict) -> float:
-        d = m.get("duration") or {}
-        lo, hi = float(d.get("min", 4)), float(d.get("max", 15))
-        return float(max(lo, min(hi, round(seconds or 5))))
-
-    def _pick_targets(self, proj: dict, shot_ids: list[str] | None, force: bool) -> tuple[list[dict], list[dict]]:
-        targets, skipped = [], []
-        for s in proj["shots"]:
-            if shot_ids and s["id"] not in shot_ids:
-                continue
-            if not s.get("prompt") or not s["prompt"].get("positive"):
-                skipped.append({"shot": s["id"], "shot_no": s["shot_no"], "reason": "还没有提示词"})
-                continue
-            active = [j for j in s["jobs"] if j["status"] in ACTIVE_JOB]
-            if active and not force:
-                skipped.append({"shot": s["id"], "shot_no": s["shot_no"], "reason": "已经在跑"})
-                continue
-            done = [j for j in s["jobs"] if j["status"] == "succeeded"]
-            if done and not force and not shot_ids:
-                skipped.append({"shot": s["id"], "shot_no": s["shot_no"], "reason": "已经有成片（重做请单独指定镜头）"})
-                continue
-            targets.append(s)
-        return targets, skipped
-
-    async def quote_videos(self, pid: str, shot_ids: list[str] | None = None, force: bool = False,
-                           resolution: str | None = None, model: str | None = None) -> dict:
-        proj = self.get(pid)
-        st = proj["settings"]
-        model = model or st["video_model"]
-        res = (resolution or st["resolution"]).upper()
-        m = await self.model_info(model)
-        if m.get("specs") and res not in m["specs"]:
-            raise WorkflowError(f"{model} 不支持 {res}，可选：{'/'.join(m['specs'])}")
-        targets, skipped = self._pick_targets(proj, shot_ids, force)
-        items, total = [], 0.0
-        for s in targets:
-            dur = self._clamp_duration(s["duration_s"], m)
-            q = await self.agg.quote(model, spec=res, seconds=dur)
-            items.append({"shot": s["id"], "episode": s["episode_no"], "shot_no": s["shot_no"],
-                          "seconds": dur, "rmb": q["rmb"]})
-            total += q["rmb"]
-        spend = proj["spend"]
-        return {"model": model, "resolution": res, "live": bool(m.get("live")), "items": items,
-                "skipped": skipped, "total_rmb": round(total, 4), "spent_rmb": spend["total_rmb"],
-                "budget_rmb": spend["budget_rmb"], "remaining_rmb": spend["remaining_rmb"],
-                "within_budget": total <= spend["remaining_rmb"] + 1e-9}
-
-    def _video_refs(self, s: dict, assets_by_id: dict, mode: str, m: dict) -> tuple[str, list[dict], list[dict]]:
-        """决定出片模式与参考图。返回 (mode, images_for_upstream, refs_for_record)。"""
-        modes = m.get("modes") or []
-        bindings = (s.get("prompt") or {}).get("bindings") or []
-        bound = []
-        for b in bindings:
-            a = assets_by_id.get(b["asset_id"])
-            if a and (a["local_path"] or a["image_url"]):
-                bound.append(a)
-        if mode == "auto":
-            if bound and "全能参考" in modes:
-                mode = "reference"
-            elif s.get("frame") and "首帧参考" in modes:
-                mode = "first_frame"
-            else:
-                mode = "text"
-        images, record = [], []
-        if mode == "reference":
-            for a in bound[:4]:
-                images.append({"url": self._ref_url(a["local_path"], a["image_url"]), "role": "reference_image"})
-                record.append({"asset_id": a["id"], "name": a["name"], "version": a["current_version"],
-                               "role": "reference_image"})
-        elif mode == "first_frame":
-            if s.get("frame_path") or s.get("frame_url"):
-                images.append({"url": self._ref_url(s.get("frame_path", ""), s.get("frame_url", "")),
-                               "role": "first_frame"})
-                record.append({"frame": True, "role": "first_frame"})
-            else:
-                mode = "text"
-        return mode, images, record
-
-    async def submit_videos(self, pid: str, shot_ids: list[str] | None = None, force: bool = False,
-                            resolution: str | None = None, mode: str | None = None,
-                            model: str | None = None) -> dict:
-        quote = await self.quote_videos(pid, shot_ids, force, resolution, model)
-        if quote["items"] and not quote["within_budget"]:
-            raise BudgetExceeded(
-                f"超出项目预算：本次约 ¥{quote['total_rmb']:.2f}，剩余 ¥{quote['remaining_rmb']:.2f}"
-                f"（预算 ¥{quote['budget_rmb']:.2f}）。调高预算或少选几个镜头。", quote)
-        self.resolve_references(pid, shot_ids)
-        proj = self.get(pid)
-        st = proj["settings"]
-        model, res = quote["model"], quote["resolution"]
-        m = await self.model_info(model)
-        mode = mode or st["video_mode"]
-        by_id = {a["id"]: a for a in proj["assets"]}
-        shots = {s["id"]: s for s in proj["shots"]}
-        submitted, skipped = [], list(quote["skipped"])
-        for item in quote["items"]:
-            s = shots[item["shot"]]
-            used_mode, images, record = self._video_refs(s, by_id, mode, m)
-            version = (max((j["version"] for j in s["jobs"]), default=0)) + 1
-            crid = _h(s["id"], version, s["prompt"]["rev"], model, res)
-            prompt = s["prompt"]["positive"]
-            if s["prompt"].get("negative"):
-                prompt += f"\n避免：{s['prompt']['negative']}"
-            try:
-                r = await self._with_topup(lambda: self.agg.submit_video(
-                    model, prompt, res, item["seconds"], st["aspect_ratio"], images or None, idem=crid))
-            except AggError as e:
-                skipped.append({"shot": s["id"], "shot_no": s["shot_no"], "reason": str(e)[:200]})
-                continue
-            jid = _id("job")
-            with db.tx() as c:
-                c.execute("""INSERT INTO jobs(id,shot_id,version,client_request_id,agg_task_id,model,resolution,
-                             duration_s,mode,refs_json,prompt_snapshot,status,quoted_rmb,created_at,updated_at)
-                             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                          (jid, s["id"], version, crid, r["id"], model, res, item["seconds"], used_mode,
-                           db.dump(record), prompt, "submitted",
-                           float((r.get("billing") or {}).get("quoted_rmb") or item["rmb"]), db.now(), db.now()))
-                c.execute("UPDATE shots SET status='video_submitted' WHERE id=?", (s["id"],))
-            submitted.append({"shot": s["id"], "episode": s["episode_no"], "shot_no": s["shot_no"],
-                              "job": jid, "version": version, "mode": used_mode, "task": r["id"],
-                              "quoted_rmb": (r.get("billing") or {}).get("quoted_rmb")})
-        self.refresh_status(pid)
-        return {"project": pid, "submitted": submitted, "skipped": skipped, "quote": quote}
-
-    async def poll_videos(self, pid: str | None = None) -> dict:
-        """推进所有在跑的视频任务（pid=None 时跨项目）。成功即下载到本地，并设为该镜头的选用版本。
-        后台轮询器和一键任务可能同时调用，这里串行化，避免同一任务被结算/下载两次。"""
-        if self._poll_lock is None:
-            self._poll_lock = asyncio.Lock()
-        async with self._poll_lock:
-            return await self._poll_videos(pid)
-
-    async def _poll_videos(self, pid: str | None) -> dict:
-        sql =("SELECT j.*, s.project_id, s.selected_job_id FROM jobs j JOIN shots s ON s.id=j.shot_id "
-               "WHERE j.status IN ('submitted','running')")
-        args: tuple = ()
-        if pid:
-            sql += " AND s.project_id=?"
-            args = (pid,)
-        with db.tx() as c:
-            rows = [dict(r) for r in c.execute(sql, args).fetchall()]
-        done, failed, running = [], [], []
-        projects = set()
-        for j in rows:
-            projects.add(j["project_id"])
-            try:
-                r = await self.agg.poll_video(j["agg_task_id"])
-            except AggError as e:
-                with db.tx() as c:
-                    c.execute("UPDATE jobs SET error=?, updated_at=? WHERE id=?", (str(e)[:300], db.now(), j["id"]))
-                running.append({"job": j["id"], "error": str(e)[:120]})
-                continue
-            status = r.get("status")
-            if status == "succeeded":
-                url = r.get("url") or ""
-                seconds = float(r.get("seconds") or j["duration_s"])
-                local = await self._store_video(j["project_id"], j, url, seconds)
-                charged = float((r.get("billing") or {}).get("charged_rmb") or 0)
-                with db.tx() as c:
-                    c.execute("UPDATE jobs SET status='succeeded', url=?, local_path=?, seconds=?, charged_rmb=?,"
-                              " error='', updated_at=? WHERE id=?",
-                              (url, local, seconds, charged, db.now(), j["id"]))
-                    c.execute("UPDATE shots SET status='video_done', selected_job_id=? WHERE id=?",
-                              (j["id"], j["shot_id"]))
-                done.append({"job": j["id"], "shot": j["shot_id"], "url": url, "local": bool(local),
-                             "charged_rmb": charged})
-            elif status in ("failed", "cancelled"):
-                with db.tx() as c:
-                    c.execute("UPDATE jobs SET status=?, error=?, updated_at=? WHERE id=?",
-                              (status, str(r.get("error") or "上游失败，已退回预扣"), db.now(), j["id"]))
-                    has_ok = c.execute("SELECT 1 FROM jobs WHERE shot_id=? AND status='succeeded'",
-                                       (j["shot_id"],)).fetchone()
-                    c.execute("UPDATE shots SET status=? WHERE id=?",
-                              ("video_done" if has_ok else "video_failed", j["shot_id"]))
-                failed.append({"job": j["id"], "shot": j["shot_id"]})
-            else:
-                with db.tx() as c:
-                    c.execute("UPDATE jobs SET status='running', updated_at=? WHERE id=?", (db.now(), j["id"]))
-                running.append({"job": j["id"], "shot": j["shot_id"]})
-        for p in projects:
-            self.refresh_status(p)
-        return {"project": pid, "done": done, "failed": failed, "running": running}
-
-    async def _store_video(self, pid: str, j: dict, url: str, seconds: float) -> str:
-        path = media.path_for(pid, "videos", f"{j['shot_id']}_v{j['version']}.mp4")
-        try:
-            if not url or media.is_mock_url(url):
-                ok = await media.placeholder_mp4(path, seconds, seed=f"{j['shot_id']}{j['version']}",
-                                                 aspect=self.settings(pid)["aspect_ratio"])
-                return path if ok else ""
-            data = await self.agg.fetch(url)
-            with open(path, "wb") as f:
-                f.write(data)
-            return path
-        except Exception as e:  # 下载失败不影响任务成功；界面上仍可用上游 URL 播放
-            log.warning("download video failed %s: %s", url[:80], e)
-            return ""
-
-    async def cancel_job(self, job_id: str) -> dict:
-        with db.tx() as c:
-            j = c.execute("SELECT j.*, s.project_id FROM jobs j JOIN shots s ON s.id=j.shot_id WHERE j.id=?",
-                          (job_id,)).fetchone()
-        if not j:
-            raise NotFound(f"任务不存在：{job_id}")
-        if j["status"] not in ACTIVE_JOB:
-            return {"job": job_id, "status": j["status"]}
-        r = await self.agg.cancel_video(j["agg_task_id"])
-        with db.tx() as c:
-            c.execute("UPDATE jobs SET status='cancelled', error='手动取消', updated_at=? WHERE id=?",
-                      (db.now(), job_id))
-            has_ok = c.execute("SELECT 1 FROM jobs WHERE shot_id=? AND status='succeeded'",
-                               (j["shot_id"],)).fetchone()
-            c.execute("UPDATE shots SET status=? WHERE id=?",
-                      ("video_done" if has_ok else "prompt_ready", j["shot_id"]))
-        self.refresh_status(j["project_id"])
-        return {"job": job_id, "status": "cancelled", "refund": r.get("refund")}
-
-    def select_job(self, shot_id: str, job_id: str) -> dict:
-        with db.tx() as c:
-            j = c.execute("SELECT * FROM jobs WHERE id=? AND shot_id=?", (job_id, shot_id)).fetchone()
-            if not j:
-                raise NotFound("这个镜头没有该版本")
-            if j["status"] != "succeeded":
-                raise WorkflowError("只能选用已经成功的版本")
-            c.execute("UPDATE shots SET selected_job_id=? WHERE id=?", (job_id, shot_id))
-            ep = c.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
-            c.execute("UPDATE episodes SET final_path='', srt_path='', final_seconds=0 WHERE id=?",
-                      (ep["episode_id"],))
-        return {"shot": shot_id, "selected_job_id": job_id}
-
-    # ==================================================================
-    # 成片
-    # ==================================================================
-
-    async def assemble(self, pid: str, episode_no: int | None = None, allow_partial: bool = False) -> dict:
-        proj = self.get(pid)
-        st = proj["settings"]
-        out = []
-        for ep in proj["episodes"]:
-            if episode_no is not None and ep["no"] != episode_no:
-                continue
-            shots = [s for s in proj["shots"] if s["episode_id"] == ep["id"]]
-            if not shots:
-                continue
-            clips, missing = [], []
-            for s in shots:
-                j = s["job"] if s["job"] and s["job"]["status"] == "succeeded" else None
-                if j and j["local_path"] and os.path.exists(j["local_path"]):
-                    clips.append({"path": j["local_path"], "seconds": j["seconds"], "dialogue": s["dialogue"]})
-                else:
-                    missing.append(s["shot_no"])
-            if missing and not allow_partial:
-                raise WorkflowError(f"第 {ep['no']} 集还有镜头没出片或没下载：{missing}")
-            name = f"EP{ep['no']:02d}"
-            final = media.path_for(pid, "exports", f"{name}.mp4")
-            srt = media.path_for(pid, "exports", f"{name}.srt")
-            r = await media.assemble(clips, final, srt, st["aspect_ratio"], st["burn_subtitles"])
-            with db.tx() as c:
-                c.execute("UPDATE episodes SET final_path=?, srt_path=?, final_seconds=?, final_at=? WHERE id=?",
-                          (final, srt, r["seconds"], db.now(), ep["id"]))
-            out.append({"episode": ep["no"], "url": media.url_of(final), "srt_url": media.url_of(srt),
-                        "seconds": r["seconds"], "clips": r["clips"], "missing": missing,
-                        "subtitles": r["subtitles"]})
-        if not out:
-            raise WorkflowError("没有可合成的剧集")
-        self.refresh_status(pid)
-        return {"project": pid, "episodes": out}
+        return {"changed": sorted(new), "rev": rev, "merged": merged}
 
     # ==================================================================
     # 一键全流程（由 runner 放到后台跑）
@@ -985,13 +624,17 @@ class Workflow:
             except Exception as e:
                 if progress:
                     await progress.fail(name, str(e))
+                self.notify(pid, "error", f"一键成片在「{name}」失败", str(e)[:300])
                 raise
             if progress:
                 await progress.done(name, r if isinstance(r, dict) else {})
             return r
 
-        async def _noop(msg):
+        async def _note(msg):
             return {"note": msg}
+
+        async def _brief(coro, fn):
+            return fn(await coro)
 
         st = self.settings(pid)
         summary: dict = {}
@@ -999,54 +642,32 @@ class Workflow:
         with db.tx() as c:
             has_assets = c.execute("SELECT COUNT(*) n FROM assets WHERE project_id=?", (pid,)).fetchone()["n"]
         if has_assets:
-            await step("资产抽取", _noop("已有资产，跳过"))
+            await step("资产抽取", _note("已有资产，跳过"))
         else:
-            r = await step("资产抽取", self._brief(self.extract_assets(pid), lambda r: {
+            summary["assets"] = await step("资产抽取", _brief(self.extract_assets(pid), lambda r: {
                 "source": r["source"], "added": len(r["added"])}))
-            summary["assets"] = r
         if st["gen_asset_images"]:
-            summary["asset_images"] = await step("资产参考图", self._brief(self.gen_asset_images(pid), lambda r: {
+            summary["asset_images"] = await step("资产参考图", _brief(self.gen_asset_images(pid), lambda r: {
                 "generated": len(r["generated"]), "failed": len(r["failed"])}))
-        summary["storyboard"] = await step("分镜", self._brief(self.storyboard(pid), lambda r: {
-            "episodes": r["results"]}))
+        summary["storyboard"] = await step("分镜", _brief(self.storyboard(pid), lambda r: {"episodes": r["results"]}))
+        if st["gen_blocking"]:
+            summary["blocking"] = await step("站位图", _brief(self.gen_blocking(pid), lambda r: {
+                "generated": len(r["generated"]), "failed": len(r["failed"])}))
         if st["gen_frames"]:
-            summary["frames"] = await step("分镜图", self._brief(self.gen_frames(pid), lambda r: {
+            summary["frames"] = await step("分镜图", _brief(self.gen_frames(pid), lambda r: {
                 "generated": len(r["generated"]), "failed": len(r["failed"])}))
-        summary["prompts"] = await step("提示词", self._brief(self.prompts(pid), lambda r: {
+        summary["prompts"] = await step("提示词", _brief(self.prompts(pid), lambda r: {
             "generated": r["generated"], "source": r["source"]}))
-        summary["videos"] = await step("提交视频", self._brief(self.submit_videos(pid, resolution=resolution),
-                                                           lambda r: {"submitted": len(r["submitted"]),
-                                                                      "skipped": len(r["skipped"]),
-                                                                      "quoted_rmb": r["quote"]["total_rmb"]}))
+        summary["videos"] = await step("提交视频", _brief(self.submit_videos(pid, resolution=resolution),
+                                                       lambda r: {"submitted": len(r["submitted"]),
+                                                                  "skipped": len(r["skipped"]),
+                                                                  "quoted_rmb": r["quote"]["total_rmb"]}))
         summary["receipts"] = await step("等待出片", self.wait_videos(pid, wait_timeout_s, poll_interval_s))
         if st["auto_assemble"]:
-            summary["final"] = await step("合成成片", self._brief(
+            summary["final"] = await step("合成成片", _brief(
                 self.assemble(pid, allow_partial=True), lambda r: {"episodes": r["episodes"]}))
+        self.notify(pid, "success", "一键成片完成", f"提交 {summary['videos']['submitted']} 个镜头")
         return summary
-
-    @staticmethod
-    async def _brief(coro, fn):
-        return fn(await coro)
-
-    async def wait_videos(self, pid: str, timeout_s: float | None = None, interval_s: float | None = None) -> dict:
-        timeout_s = float(timeout_s if timeout_s is not None else os.environ.get("WORKFLOW_WAIT_TIMEOUT_S", 3600))
-        interval_s = float(interval_s if interval_s is not None else os.environ.get("WORKFLOW_WAIT_INTERVAL_S", 10))
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
-        rounds = 0
-        while True:
-            rounds += 1
-            r = await self.poll_videos(pid)
-            if not r["running"]:
-                break
-            if loop.time() >= deadline:
-                return {"rounds": rounds, "timed_out": True, "running": len(r["running"])}
-            await asyncio.sleep(interval_s)
-        with db.tx() as c:
-            counts = {row["status"]: row["n"] for row in c.execute(
-                "SELECT j.status, COUNT(*) n FROM jobs j JOIN shots s ON s.id=j.shot_id WHERE s.project_id=? "
-                "GROUP BY j.status", (pid,)).fetchall()}
-        return {"rounds": rounds, "timed_out": False, "jobs": counts}
 
     # ==================================================================
     # 内部
@@ -1062,3 +683,7 @@ class Workflow:
                 raise
             await self.agg.topup(self.auto_topup_rmb)
             return await fn()
+
+
+__all__ = ["Workflow", "WorkflowError", "NotFound", "Conflict", "BudgetExceeded", "DEFAULT_SETTINGS",
+           "ACTIVE_JOB", "_id", "_h"]
