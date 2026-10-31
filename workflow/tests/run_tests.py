@@ -523,6 +523,47 @@ async def main() -> int:
             check("EDL / FCPXML 结构正确", "FROM CLIP NAME: 01_2-1" in edl and fx.tag == "fcpxml"
                   and len(fx.findall(".//asset-clip")) == len([n for n in names if n.startswith("第2集/片段/")]), edl[:120])
 
+        print("\n[W] 发给视频模型的提示词改写 / 文本花费记账 / 旧库迁移")
+        from wf.video_ops import VideoMixin  # noqa: E402
+        binds = [{"mention": "@孔宣（蛋形态）", "form_id": "f_egg", "asset_id": "a_kx"},
+                 {"mention": "@孔宣", "form_id": "f_kx", "asset_id": "a_kx"},
+                 {"mention": "@金鸡岭", "form_id": "f_jjl", "asset_id": "a_jjl"},
+                 {"mention": "@萤姐音色", "form_id": "f_voice", "asset_id": "a_v"}]
+        rec = [{"blocking": "1-1", "role": "reference_image"},
+               {"form_id": "f_kx", "name": "孔宣", "form": "默认", "role": "reference_image"},
+               {"form_id": "f_egg", "name": "孔宣", "form": "蛋", "role": "reference_image"},
+               {"asset_id": "a_v", "name": "萤姐音色", "role": "reference_audio"}]
+        up = VideoMixin.upstream_prompt("参考资产：@孔宣、@孔宣（蛋形态）；整体环境参考@金鸡岭；萤姐声线参考@萤姐音色\n@孔宣抬头",
+                                        "reference", rec, binds)
+        check("全能参考：@名字 → 图N（名字），开头写【参考】说明", up.startswith("【参考】图1：场次 1-1 的站位图")
+              and "图2（孔宣）" in up and "图3（孔宣（蛋形态））" in up and "音频1（萤姐音色）" in up
+              and "图2：孔宣；图3：孔宣（蛋形态）" in up and "@" not in up and "金鸡岭" in up, up)
+        up2 = VideoMixin.upstream_prompt("@孔宣站在@金鸡岭", "text", [], binds)
+        check("文生视频：去掉 @ 符号", up2 == "孔宣站在金鸡岭", up2)
+        wf_main.wf()._add_text_spend(pid, 0.0123)
+        sp = (await j(await c.get(f"/projects/{pid}")))["spend"]
+        check("文本花费计入项目总花费", sp["text_rmb"] >= 0.0123 and abs(sp["total_rmb"] - sp["videos_rmb"] - sp["images_rmb"]
+                                                                      - sp["text_rmb"]) < 1e-6, json.dumps(sp))
+        import sqlite3  # noqa: E402
+        from wf import db as wfdb  # noqa: E402
+        old = os.path.join(TMP, "old.db")
+        con = sqlite3.connect(old)
+        con.executescript(wfdb.SCHEMA.replace("  text_charged_rmb REAL NOT NULL DEFAULT 0,\n", ""))
+        con.execute("INSERT INTO projects(id,name,created_at,updated_at) VALUES('p_old','旧项目','x','x')")
+        con.commit()
+        con.close()
+        saved = wfdb.DB_PATH
+        wfdb.DB_PATH = old
+        try:
+            wfdb.init()
+            con = sqlite3.connect(old)
+            cols = {r[1] for r in con.execute("PRAGMA table_info(projects)")}
+            kept = con.execute("SELECT name FROM projects WHERE id='p_old'").fetchone()
+            con.close()
+        finally:
+            wfdb.DB_PATH = saved
+        check("旧库启动时自动补列、数据不丢", "text_charged_rmb" in cols and kept and kept[0] == "旧项目", str(cols))
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

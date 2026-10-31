@@ -89,6 +89,18 @@ models:
     routes:
       - { provider: volcengine_official, api_id: doubao-seedance-2-0-mini-260615, weight: 1 }
 
+  # ---- 阿里百炼 · 万相 3.0（全能参考：首帧 / 多参考图 / 参考音频；原生音频；官方价 480P 0.3 元/秒，常有 7 折与免费额度）----
+  - id: wan3.0-video
+    type: video
+    unit: output_second
+    price: { rmb_per_second: { 480P: 0.30, 720P: 0.60, 1080P: 1.20 } }
+    cost: { rmb_per_second: { 480P: 0.30, 720P: 0.60, 1080P: 1.20 } }
+    specs: [480P, 720P, 1080P]
+    duration: { min: 2, max: 15, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考, 音频参考]
+    routes:
+      - { provider: dashscope_video, api_id: wan3.0-video, weight: 1 }
+
   - id: ark-seedance-1.0-pro-fast
     type: video
     unit: output_second

@@ -17,6 +17,13 @@ providers:
     api_key_env: DASHSCOPE_API_KEY
     concurrency: 8
     timeout_s: 180
+  - id: dashscope_video
+    label: 阿里百炼 · 万相视频（异步任务接口）
+    kind: dashscope_video
+    base_url: https://dashscope.aliyuncs.com/api/v1
+    api_key_env: DASHSCOPE_API_KEY
+    concurrency: 4
+    timeout_s: 180
   # 火山方舟 volcengine_official 见下方
 
   # ---------- 刀徒同款渠道（多数 base_url 为占位，填 key 前先核对地址） ----------

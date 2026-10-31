@@ -182,6 +182,9 @@ class ExtrasMixin:
             res = await self.agg.chat(model, [{"role": "system", "content": system}, *history,
                                               {"role": "user", "content": content}], max_tokens=2000, temperature=0.7)
             reply = res["choices"][0]["message"]["content"]
+            if s["project_id"]:
+                llm.current_project.set(s["project_id"])
+                llm.record_charge(res)
             meta.update(source="real", billing=res.get("billing"), routing=res.get("routing"))
             if reply.startswith("[mock:"):
                 meta["source"] = "mock"
@@ -217,6 +220,7 @@ class ExtrasMixin:
         if not (idea or "").strip():
             raise WorkflowError("先写一句灵感、故事梗概或贴一段小说")
         episodes = max(1, min(30, int(episodes)))
+        llm.current_project.set(pid)
         text, source = await llm.generate_script(self.agg, st["text_model"], idea, episodes, p["style"],
                                                  3, seconds_per_ep, st["engine"])
         if mode == "append" and p["script_text"].strip():

@@ -12,11 +12,27 @@ import os
 import re
 from collections import Counter
 
+import contextvars
 import logging
+from typing import Callable
 
 from .agg import Agg, AggError
 
 log = logging.getLogger("workflow.llm")
+
+# 当前在为哪个项目调用模型：文本花费记到这个项目上（Workflow 在各入口设置；并发子任务自动继承）
+current_project: contextvars.ContextVar[str] = contextvars.ContextVar("current_project", default="")
+charge_hook: Callable[[str, float], None] | None = None
+
+
+def record_charge(res: dict) -> None:
+    rmb = float(((res or {}).get("billing") or {}).get("charged_rmb") or 0)
+    pid = current_project.get()
+    if rmb and pid and charge_hook:
+        try:
+            charge_hook(pid, rmb)
+        except Exception:  # 记账失败不影响主流程
+            log.exception("记录文本花费失败")
 
 SIZES = ["史诗大远景", "全景", "中景", "近景", "特写"]
 ANGLES = ["俯拍", "平视", "仰拍", "低机位", "过肩"]
@@ -67,6 +83,7 @@ def _clamp(v, lo, hi, default):
 async def ask(agg: Agg, model: str, system: str, user: str, max_tokens: int, temperature: float = 0.2) -> str:
     res = await agg.chat(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
                          max_tokens=max_tokens, temperature=temperature)
+    record_charge(res)
     return res["choices"][0]["message"]["content"]
 
 

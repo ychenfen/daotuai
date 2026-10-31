@@ -125,6 +125,7 @@ class AssetsMixin:
         if not p["script_text"].strip():
             raise WorkflowError("剧本是空的")
         st = self.settings(pid)
+        llm.current_project.set(pid)
         data, source = await llm.extract_assets(self.agg, p["script_text"], p["style"], st["text_model"],
                                                 engine or st["engine"])
         added, forms_added = [], []
@@ -268,19 +269,23 @@ class AssetsMixin:
         with db.tx() as c:
             assets = self._assets(c, pid)
         done, failed = [], []
-        for a in assets:
-            if a["kind"] == "audio" or (kinds and a["kind"] not in kinds):
-                continue
-            # 先出默认形态，其他形态才有参考
-            for f in sorted(a["forms"], key=lambda x: (not x["is_default"], x["sort"])):
-                if only_missing and f["current_version"]:
-                    continue
-                try:
-                    na = await self.gen_form_image(f["id"])
-                    nf = next(x for x in na["forms"] if x["id"] == f["id"])
-                    done.append({"asset": a["name"], "form": f["name"], "version": nf["current_version"]})
-                except (AggError, media.MediaError, WorkflowError) as e:
-                    failed.append({"asset": a["name"], "form": f["name"], "error": str(e)[:200]})
+        todo = [(a, f) for a in assets if a["kind"] != "audio" and not (kinds and a["kind"] not in kinds)
+                for f in a["forms"] if not (only_missing and f["current_version"])]
+
+        async def one(a, f):
+            na = await self.gen_form_image(f["id"])
+            return next(x for x in na["forms"] if x["id"] == f["id"])["current_version"]
+
+        # 先并发出默认形态，再并发出其他形态（其他形态要拿默认形态当参考，保证是同一个人）
+        for phase in ([x for x in todo if x[1]["is_default"]], [x for x in todo if not x[1]["is_default"]]):
+            outs = await self.gather_limited(one(a, f) for a, f in phase)
+            for (a, f), out in zip(phase, outs):
+                if isinstance(out, (AggError, media.MediaError, WorkflowError)):
+                    failed.append({"asset": a["name"], "form": f["name"], "error": str(out)[:200]})
+                elif isinstance(out, Exception):
+                    raise out
+                else:
+                    done.append({"asset": a["name"], "form": f["name"], "version": out})
         if done or failed:
             self.notify(pid, "error" if failed else "success", f"资产出图完成：{len(done)} 张"
                         + (f"，失败 {len(failed)}" if failed else ""))
@@ -290,6 +295,7 @@ class AssetsMixin:
         a = self.asset(aid)
         p = self._project_row(a["project_id"])
         st = self.settings(a["project_id"])
+        llm.current_project.set(a["project_id"])
         text, source = await llm.polish(self.agg, st["text_model"], a["kind"], a["name"], a["description"],
                                         p["style"], st["engine"])
         self.edit("asset", aid, {"description": text})
@@ -395,14 +401,11 @@ class AssetsMixin:
         proj = self.get(pid)
         st = proj["settings"]
         by_name = {a["name"]: a for a in proj["assets"]}
-        done, failed = [], []
-        for sc in proj["scenes"]:
-            if scene_ids and sc["id"] not in scene_ids:
-                continue
-            if episode_no is not None and sc["episode_no"] != episode_no:
-                continue
-            if only_missing and sc["blocking"] and not scene_ids:
-                continue
+        targets = [sc for sc in proj["scenes"] if not (scene_ids and sc["id"] not in scene_ids)
+                   and not (episode_no is not None and sc["episode_no"] != episode_no)
+                   and not (only_missing and sc["blocking"] and not scene_ids)]
+
+        async def one(sc):
             chars = sc["characters"] or llm.scene_characters(
                 sc["text"], [a["name"] for a in proj["assets"] if a["kind"] in ("character", "creature")])
             refs = []
@@ -411,21 +414,26 @@ class AssetsMixin:
                 if a and (a["local_path"] or a["image_url"]) and a["kind"] != "audio":
                     refs.append(self._ref_url(a["local_path"], a["image_url"]))
             prompt = llm.blocking_prompt(sc, chars, proj["style"], "16:9")
-            try:
-                res = await self._with_topup(lambda: self.agg.image(
-                    st["image_model"], prompt, size=image_size("16:9", st["image_resolution"]), refs=refs or None,
-                    idem=f"blocking:{sc['id']}:{short_hash(prompt, len(refs))}"))
-                url = (res.get("data") or [{}])[0].get("url") or ""
-                local, _ = await self._store_image(pid, "blocking", f"{sc['id']}_{short_hash(prompt)[:6]}", url,
-                                                   seed=sc["id"])
-                charged = float((res.get("billing") or {}).get("charged_rmb") or 0)
-                with db.tx() as c:
-                    c.execute("UPDATE scenes SET blocking_url=?, blocking_path=?, blocking_prompt=?, "
-                              "blocking_charged_rmb=blocking_charged_rmb+? WHERE id=?",
-                              ("" if url.startswith("data:") else url, local, prompt, charged, sc["id"]))
-                done.append({"scene": sc["id"], "code": sc["code"], "refs": len(refs)})
-            except (AggError, media.MediaError) as e:
-                failed.append({"scene": sc["id"], "code": sc["code"], "error": str(e)[:200]})
+            res = await self.agg.image(st["image_model"], prompt, size=image_size("16:9", st["image_resolution"]),
+                                       refs=refs or None, idem=f"blocking:{sc['id']}:{short_hash(prompt, len(refs))}")
+            url = (res.get("data") or [{}])[0].get("url") or ""
+            local, _ = await self._store_image(pid, "blocking", f"{sc['id']}_{short_hash(prompt)[:6]}", url,
+                                               seed=sc["id"])
+            charged = float((res.get("billing") or {}).get("charged_rmb") or 0)
+            with db.tx() as c:
+                c.execute("UPDATE scenes SET blocking_url=?, blocking_path=?, blocking_prompt=?, "
+                          "blocking_charged_rmb=blocking_charged_rmb+? WHERE id=?",
+                          ("" if url.startswith("data:") else url, local, prompt, charged, sc["id"]))
+            return len(refs)
+
+        done, failed = [], []
+        for sc, out in zip(targets, await self.gather_limited(one(sc) for sc in targets)):
+            if isinstance(out, (AggError, media.MediaError)):
+                failed.append({"scene": sc["id"], "code": sc["code"], "error": str(out)[:200]})
+            elif isinstance(out, Exception):
+                raise out
+            else:
+                done.append({"scene": sc["id"], "code": sc["code"], "refs": out})
         return {"generated": done, "failed": failed}
 
     # ------------------------------------------------------------------
@@ -436,12 +444,10 @@ class AssetsMixin:
         proj = self.get(pid)
         st = proj["settings"]
         by_name = {a["name"]: a for a in proj["assets"]}
-        done, failed = [], []
-        for s in proj["shots"]:
-            if shot_ids and s["id"] not in shot_ids:
-                continue
-            if only_missing and s["frame"] and not shot_ids:
-                continue
+        targets = [s for s in proj["shots"] if not (shot_ids and s["id"] not in shot_ids)
+                   and not (only_missing and s["frame"] and not shot_ids)]
+
+        async def one(s):
             refs = []
             for name in [re.sub(r"[（(].*$", "", x) for x in (s["characters"] or [])[:3]] + \
                     ([s["scene_asset"]] if s["scene_asset"] else []):
@@ -449,20 +455,23 @@ class AssetsMixin:
                 if a and (a["local_path"] or a["image_url"]):
                     refs.append(self._ref_url(a["local_path"], a["image_url"]))
             prompt = llm.frame_image_prompt(s, proj["style"], st["aspect_ratio"])
-            try:
-                res = await self._with_topup(lambda: self.agg.image(
-                    st["image_model"], prompt, size=image_size(st["aspect_ratio"], "1K"), refs=refs or None,
-                    idem=f"frame:{s['id']}:{short_hash(prompt, len(refs))}"))
-                url = (res.get("data") or [{}])[0].get("url") or ""
-                local, _ = await self._store_image(pid, "frames", f"{s['id']}_{short_hash(prompt)[:6]}", url,
-                                                   seed=s["id"])
-                charged = float((res.get("billing") or {}).get("charged_rmb") or 0)
-                with db.tx() as c:
-                    c.execute("UPDATE shots SET frame_url=?, frame_path=?, frame_charged_rmb=frame_charged_rmb+? "
-                              "WHERE id=?", ("" if url.startswith("data:") else url, local, charged, s["id"]))
+            res = await self.agg.image(st["image_model"], prompt, size=image_size(st["aspect_ratio"], "1K"),
+                                       refs=refs or None, idem=f"frame:{s['id']}:{short_hash(prompt, len(refs))}")
+            url = (res.get("data") or [{}])[0].get("url") or ""
+            local, _ = await self._store_image(pid, "frames", f"{s['id']}_{short_hash(prompt)[:6]}", url, seed=s["id"])
+            charged = float((res.get("billing") or {}).get("charged_rmb") or 0)
+            with db.tx() as c:
+                c.execute("UPDATE shots SET frame_url=?, frame_path=?, frame_charged_rmb=frame_charged_rmb+? "
+                          "WHERE id=?", ("" if url.startswith("data:") else url, local, charged, s["id"]))
+
+        done, failed = [], []
+        for s, out in zip(targets, await self.gather_limited(one(s) for s in targets)):
+            if isinstance(out, (AggError, media.MediaError)):
+                failed.append({"shot": s["id"], "error": str(out)[:200]})
+            elif isinstance(out, Exception):
+                raise out
+            else:
                 done.append({"shot": s["id"], "code": s["code"]})
-            except (AggError, media.MediaError) as e:
-                failed.append({"shot": s["id"], "error": str(e)[:200]})
         return {"generated": done, "failed": failed}
 
     # ------------------------------------------------------------------

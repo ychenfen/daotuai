@@ -67,6 +67,22 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
         self.auto_topup_rmb = auto_topup_rmb
         self._models: dict[str, dict] | None = None
         self._poll_lock: asyncio.Lock | None = None
+        llm.charge_hook = self._add_text_spend
+
+    @staticmethod
+    def _add_text_spend(pid: str, rmb: float) -> None:
+        with db.tx() as c:
+            c.execute("UPDATE projects SET text_charged_rmb=text_charged_rmb+? WHERE id=?", (rmb, pid))
+
+    @staticmethod
+    async def gather_limited(coros, limit: int | None = None) -> list:
+        """并发跑一批协程（默认同时 WORKFLOW_PARALLEL=4 路），结果按输入顺序返回；单个失败返回异常对象。"""
+        sem = asyncio.Semaphore(limit or int(os.environ.get("WORKFLOW_PARALLEL", "4")))
+
+        async def run(co):
+            async with sem:
+                return await co
+        return await asyncio.gather(*(run(co) for co in coros), return_exceptions=True)
 
     # ==================================================================
     # 项目 / 设置 / 状态
@@ -257,10 +273,11 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
                                (pid,)).fetchone()["v"]
             blocks = c.execute("SELECT COALESCE(SUM(blocking_charged_rmb),0) v FROM scenes WHERE project_id=?",
                                (pid,)).fetchone()["v"]
+            text = c.execute("SELECT text_charged_rmb v FROM projects WHERE id=?", (pid,)).fetchone()["v"]
         budget = float(self.settings(pid)["budget_rmb"])
         images = float(imgs) + float(frames) + float(blocks)
-        total = round(float(jobs) + images, 4)
-        return {"videos_rmb": round(float(jobs), 4), "images_rmb": round(images, 4),
+        total = round(float(jobs) + images + float(text), 4)
+        return {"videos_rmb": round(float(jobs), 4), "images_rmb": round(images, 4), "text_rmb": round(float(text), 4),
                 "total_rmb": total, "budget_rmb": budget, "remaining_rmb": round(budget - total, 4)}
 
     def refresh_status(self, pid: str) -> str:
@@ -387,16 +404,30 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
         targets = [e for e in proj["episodes"] if episode_no is None or e["no"] == episode_no]
         if not targets:
             raise NotFound(f"第 {episode_no} 集不存在")
+        llm.current_project.set(pid)
         char_names = [a["name"] for a in proj["assets"] if a["kind"] in ("character", "creature")]
         scene_assets = {a["name"] for a in proj["assets"] if a["kind"] == "scene"}
         results = []
+        todo = [ep for ep in targets if force or not ep["shots"]]
         for ep in targets:
-            if ep["shots"] and not force:
+            if ep not in todo:
                 results.append({"episode": ep["no"], "skipped": True, "shots": ep["shots"], "source": "cached"})
-                continue
+        # 每个场次单独一次模型调用、并发进行：输出短、不会被截断，长集也快
+        jobs = [(ep, sc) for ep in todo for sc in proj["scenes"] if sc["episode_id"] == ep["id"]]
+        outs = await self.gather_limited(
+            llm.storyboard(self.agg, [sc], proj["style"], st["text_model"], max_shots, char_names, lo, hi, target, engine)
+            for _, sc in jobs)
+        per_ep: dict[str, list] = {}
+        for (ep, sc), out in zip(jobs, outs):
+            if isinstance(out, Exception):
+                raise out
+            per_ep.setdefault(ep["id"], []).append(out)
+        for ep in todo:
+            parts = per_ep.get(ep["id"], [])
+            shots = [x for sh, _ in parts for x in sh][:max_shots]
+            sources = {src for _, src in parts}
+            source = "real" if sources == {"real"} else ("mock" if sources <= {"mock"} else "mixed")
             scenes = [s for s in proj["scenes"] if s["episode_id"] == ep["id"]]
-            shots, source = await llm.storyboard(self.agg, scenes, proj["style"], st["text_model"], max_shots,
-                                                 char_names, lo, hi, target, engine)
             if not shots:
                 raise WorkflowError(f"第 {ep['no']} 集没拆出镜头")
             by_code = {s["code"]: s for s in scenes}
@@ -417,6 +448,7 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
                                "storyboard_ready", source, db.now()))
                 c.execute("UPDATE episodes SET final_path='', srt_path='', final_seconds=0 WHERE id=?", (ep["id"],))
             results.append({"episode": ep["no"], "shots": len(shots), "source": source})
+        results.sort(key=lambda r: r["episode"])
         self.refresh_status(pid)
         return {"project": pid, "results": results, "state": self.get(pid)}
 
@@ -482,10 +514,20 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
                  and (force or shot_ids or not s.get("prompt"))]
         if not shots:
             return {"project": pid, "generated": 0, "source": "cached", "state": proj}
+        llm.current_project.set(pid)
         names = [a["name"] for a in proj["assets"]]
-        data, source = await llm.prompts(self.agg, shots, proj["style"], st["text_model"], st["aspect_ratio"],
-                                         names, self._voices(proj["assets"]), st["prompt_format"],
-                                         st["video_model"], engine)
+        voices = self._voices(proj["assets"])
+        batches = [shots[i:i + 6] for i in range(0, len(shots), 6)]   # 小批量：输出不会被截断
+        outs = await self.gather_limited(
+            llm.prompts(self.agg, b, proj["style"], st["text_model"], st["aspect_ratio"], names, voices,
+                        st["prompt_format"], st["video_model"], engine) for b in batches)
+        data, sources = [], set()
+        for out in outs:
+            if isinstance(out, Exception):
+                raise out
+            data += out[0]
+            sources.add(out[1])
+        source = "real" if sources == {"real"} else ("mock" if sources <= {"mock"} else "mixed")
         assets = proj["assets"]
         with db.tx() as c:
             for shot, item in zip(shots, data):
@@ -637,6 +679,7 @@ class Workflow(AssetsMixin, VideoMixin, ExtrasMixin):
         async def _brief(coro, fn):
             return fn(await coro)
 
+        llm.current_project.set(pid)
         st = self.settings(pid)
         summary: dict = {}
         self._ensure_parsed(pid)

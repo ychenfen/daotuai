@@ -45,11 +45,11 @@ def _client(provider: Provider) -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=provider.timeout_s, trust_env=False, proxy=proxy)
 
 
-async def _post(provider: Provider, path: str, payload: dict) -> dict:
+async def _post(provider: Provider, path: str, payload: dict, extra_headers: dict | None = None) -> dict:
     url = provider.base_url.rstrip("/") + path
     try:
         async with _client(provider) as client:
-            r = await client.post(url, json=payload, headers=_headers(provider))
+            r = await client.post(url, json=payload, headers={**_headers(provider), **(extra_headers or {})})
     except httpx.HTTPError as e:
         raise ProviderError(provider.id, None, f"network: {e}") from e
     if r.status_code >= 400:
@@ -184,7 +184,7 @@ async def image(provider: Provider, api_id: str, payload: dict) -> dict:
 
 # ---------------- video ----------------
 
-VIDEO_IMAGE_ROLES = ("first_frame", "last_frame", "reference_image")
+VIDEO_IMAGE_ROLES = ("first_frame", "last_frame", "reference_image", "reference_audio")
 
 
 def normalize_images(raw) -> list[dict]:
@@ -212,7 +212,10 @@ async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict
     if provider.kind == "ark":
         content: list[dict] = [{"type": "text", "text": payload.get("prompt", "")}]
         for img in images:
-            content.append({"type": "image_url", "image_url": {"url": img["url"]}, "role": img["role"]})
+            if img["role"] == "reference_audio":
+                content.append({"type": "audio_url", "audio_url": {"url": img["url"]}, "role": "reference_audio"})
+            else:
+                content.append({"type": "image_url", "image_url": {"url": img["url"]}, "role": img["role"]})
         if payload.get("video"):
             content.append({"type": "video_url", "video_url": {"url": payload["video"]}, "role": "reference_video"})
         body = {
@@ -226,6 +229,23 @@ async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict
         if "generate_audio" in payload:
             body["generate_audio"] = bool(payload["generate_audio"])
         data = await _post(provider, "/contents/generations/tasks", body)
+    elif provider.kind == "dashscope_video":
+        # 百炼万相：异步任务；素材放 input.media，提示词里用 图1/图2/音频1 指代（按同类素材在数组中的顺序）
+        media = [{"type": i["role"], "url": i["url"]} for i in images]
+        if payload.get("video"):
+            media.append({"type": "reference_video", "url": payload["video"]})
+        if any(m["type"] in ("first_frame", "last_frame") for m in media):   # 首尾帧不能和参考素材混用
+            media = [m for m in media if m["type"] in ("first_frame", "last_frame")]
+        body = {"model": api_id, "input": {"prompt": payload.get("prompt", "")[:2500]},
+                "parameters": {"resolution": spec.upper(), "ratio": payload.get("aspect_ratio", "16:9"),
+                               "duration": int(round(float(payload.get("duration", 5)))),
+                               "audio": bool(payload.get("generate_audio", True)), "watermark": False,
+                               "prompt_extend": False}}
+        if media:
+            body["input"]["media"] = media
+        data = await _post(provider, "/services/aigc/video-generation/video-synthesis", body,
+                           {"X-DashScope-Async": "enable"})
+        data = data.get("output") or data
     else:
         body = {"model": api_id, "prompt": payload.get("prompt", ""),
                 "duration": int(round(float(payload.get("duration", 5)))), "quality": spec.lower(),
@@ -260,6 +280,14 @@ async def poll_video(provider: Provider, provider_task_id: str) -> dict:
         return {"state": mapping.get(state, "running"),
                 "url": (data.get("content") or {}).get("video_url"),
                 "seconds": seconds, "usage": {"output_seconds": seconds}}
+    if provider.kind == "dashscope_video":
+        data = await _get(provider, f"/tasks/{provider_task_id}")
+        out, usage = data.get("output") or {}, data.get("usage") or {}
+        state = {"SUCCEEDED": "succeeded", "FAILED": "failed", "CANCELED": "failed",
+                 "UNKNOWN": "failed"}.get(out.get("task_status"), "running")
+        seconds = usage.get("output_video_duration") or usage.get("duration")
+        return {"state": state, "url": out.get("video_url"), "seconds": seconds,
+                "usage": {"output_seconds": seconds}, "error": out.get("message") or out.get("code")}
     data = await _get(provider, f"/tasks/{provider_task_id}")
     seconds = data.get("duration") or (data.get("usage") or {}).get("output_seconds")
     return {"state": {"completed": "succeeded", "failed": "failed"}.get(data.get("status"), "running"),

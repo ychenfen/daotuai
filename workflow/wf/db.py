@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS projects (
   settings_json TEXT NOT NULL DEFAULT '{}',
   cover_path TEXT NOT NULL DEFAULT '',
   pinned INTEGER NOT NULL DEFAULT 0,
+  text_charged_rmb REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -283,6 +284,19 @@ def _is_legacy() -> bool:
         c.close()
 
 
+# 增量迁移：已有库缺的列在启动时补上（不丢数据）
+MIGRATIONS = [
+    ("projects", "text_charged_rmb", "REAL NOT NULL DEFAULT 0"),
+]
+
+
+def _migrate(c) -> None:
+    for table, col, ddl in MIGRATIONS:
+        cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+
 def init() -> None:
     with _lock:
         if _is_legacy():
@@ -293,6 +307,7 @@ def init() -> None:
                     os.replace(DB_PATH + suffix, f"{DB_PATH}.legacy-{stamp}{suffix}")
         with tx() as c:
             c.executescript(SCHEMA)
+            _migrate(c)
             c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
 
 

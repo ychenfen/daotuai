@@ -54,7 +54,8 @@ def main() -> int:
             print("== 百炼：模型列表里的图像/视频")
             print("  ", ", ".join(x for x in ids if re.search(r"wan|image|wanx|kling|video", x)))
             print("== 百炼：视频（万相）")
-            for m in [x for x in ids if re.search(r"^wan", x) and re.search(r"t2v|i2v|r2v|video", x)][:12]:
+            cands = ["wan3.0-video", "wan3.0-video-prime"] + [x for x in ids if re.search(r"^wan", x) and re.search(r"t2v|i2v|r2v|video", x)]
+            for m in list(dict.fromkeys(cands))[:12]:
                 r = c.post(f"{DS}/api/v1/services/aigc/video-generation/video-synthesis", headers=h,
                            json={"model": m, "input": {"prompt": "test"}, "parameters": {"duration": 999}})
                 print(f"  {m}: {verdict(r)}")

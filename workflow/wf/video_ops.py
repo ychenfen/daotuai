@@ -169,7 +169,7 @@ class VideoMixin:
             used_mode, images, record = self._video_refs(proj, s, mode, m, form_ids, material_ids)
             version = (max((j["version"] for j in s["jobs"]), default=0)) + 1
             crid = short_hash(s["id"], version, s["prompt"]["rev"], model, res, item["seconds"], used_mode)
-            prompt = s["prompt"]["positive"]
+            prompt = self.upstream_prompt(s["prompt"]["positive"], used_mode, record, s["prompt"]["bindings"])
             if s["prompt"].get("negative"):
                 prompt += f"\n避免：{s['prompt']['negative']}"
             try:
@@ -196,6 +196,45 @@ class VideoMixin:
             self.notify(pid, "info", f"已提交 {len(submitted)} 个镜头出片",
                         f"{model} · {res} · 预计 ¥{quote['total_rmb']:.2f}")
         return {"project": pid, "submitted": submitted, "skipped": skipped, "quote": quote}
+
+    @staticmethod
+    def upstream_prompt(prompt: str, mode: str, record: list[dict], bindings: list[dict]) -> str:
+        """发给视频模型前改写提示词：模型认的是“第几张参考图”，不认我们的资产名。
+        全能参考：@孔宣 → 图1（孔宣），并在开头写【参考】图N 是什么；音色 → 音频N。其他模式：去掉 @ 符号。"""
+        import re as _re
+        idx: dict[str, str] = {}
+        legend: list[str] = []
+        n_img = n_aud = 0
+        if mode == "reference":
+            for r in record:
+                if r.get("role") == "reference_audio":
+                    n_aud += 1
+                    tag = f"音频{n_aud}"
+                    legend.append(f"{tag}：{r.get('name', '')}（声线）")
+                else:
+                    n_img += 1
+                    tag = f"图{n_img}"
+                    if r.get("blocking"):
+                        legend.append(f"{tag}：场次 {r['blocking']} 的站位图（只参考人物位置关系，不要照搬画面）")
+                        continue
+                    label = r.get("name", "") + (f"（{r['form']}形态）" if r.get("form") and r["form"] != "默认" else "")
+                    legend.append(f"{tag}：{label}")
+                if r.get("form_id"):
+                    idx[r["form_id"]] = tag
+                elif r.get("asset_id"):
+                    idx[r["asset_id"]] = tag
+        out = prompt
+        for b in sorted(bindings or [], key=lambda x: -len(x.get("mention", ""))):
+            m = b.get("mention") or ""
+            if not m.startswith("@"):
+                continue
+            tag = idx.get(b.get("form_id") or "") or idx.get(b.get("asset_id") or "")
+            name = m[1:]
+            out = out.replace(m, f"{tag}（{name}）" if tag else name)
+        out = _re.sub(r"@(?=[\u4e00-\u9fa5A-Za-z])", "", out)   # 没绑定上的 @ 一律去掉符号
+        if legend:
+            out = "【参考】" + "；".join(legend) + "\n" + out
+        return out
 
     def _reference_gate(self, pid: str, shot_ids: list[str], accept_stale: bool, allow_missing: bool,
                         form_ids: list[str] | None) -> None:
