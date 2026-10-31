@@ -229,6 +229,8 @@ async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict
         if "generate_audio" in payload:
             body["generate_audio"] = bool(payload["generate_audio"])
         data = await _post(provider, "/contents/generations/tasks", body)
+    elif provider.kind == "libtv":
+        return await _libtv_submit(api_id, spec, payload, images)
     elif provider.kind == "dashscope_video":
         # 百炼万相：异步任务；素材放 input.media，提示词里用 图1/图2/音频1 指代（按同类素材在数组中的顺序）
         media = [{"type": i["role"], "url": i["url"]} for i in images]
@@ -263,7 +265,65 @@ async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict
     return {"provider_task_id": task_id, "state": "submitted"}
 
 
+# ---------------- LibTV（远程 MCP，OAuth 登录态） ----------------
+
+_libtv_bg: set = set()
+
+
+async def _libtv_submit(api_id: str, spec: str, payload: dict, images: list[dict]) -> dict:
+    """LibTV 的 generate_video 可能一直等到出片才返回，所以放到后台跑，先回一个任务号。"""
+    from . import db, libtv
+    jid = "lt_" + uuid.uuid4().hex[:16]
+    with db.tx() as c:
+        c.execute("INSERT INTO libtv_jobs(id,status,created_at,updated_at) VALUES(?,?,?,?)",
+                  (jid, "submitting", db.now(), db.now()))
+
+    async def run():
+        try:
+            res = await libtv.generate({**payload, "images": images, "idempotency_key": "vid-" + jid}, api_id, spec)
+            with db.tx() as c:
+                c.execute("UPDATE libtv_jobs SET status='running', project_id=?, task_id=?, node_id=?, updated_at=? "
+                          "WHERE id=?", (res["project_id"], res.get("task_id") or "", res.get("node_id") or "",
+                                         db.now(), jid))
+        except Exception as e:  # 失败写库，轮询时报失败并退款
+            with db.tx() as c:
+                c.execute("UPDATE libtv_jobs SET status='failed', error=?, updated_at=? WHERE id=?",
+                          (str(e)[:500], db.now(), jid))
+
+    t = asyncio.get_running_loop().create_task(run())
+    _libtv_bg.add(t)
+    t.add_done_callback(_libtv_bg.discard)
+    return {"provider_task_id": jid, "state": "submitted"}
+
+
+async def _libtv_poll(jid: str) -> dict:
+    from . import db, libtv
+    with db.tx() as c:
+        row = c.execute("SELECT * FROM libtv_jobs WHERE id=?", (jid,)).fetchone()
+    if not row:
+        return {"state": "failed", "error": "LibTV 任务记录不存在（可能服务重启时还没提交成功）"}
+    if row["status"] in ("succeeded", "failed"):
+        return {"state": row["status"], "url": row["url"], "seconds": row["seconds"] or None,
+                "usage": {"output_seconds": row["seconds"] or None}, "error": row["error"]}
+    if row["status"] == "submitting":
+        if not any(not t.done() for t in _libtv_bg):   # 服务重启过，后台提交已丢失
+            with db.tx() as c:
+                c.execute("UPDATE libtv_jobs SET status='failed', error=? WHERE id=?",
+                          ("服务重启，提交中断（未拿到 LibTV 任务号）", jid))
+            return {"state": "failed", "error": "服务重启，提交中断"}
+        return {"state": "running"}
+    r = await libtv.poll(row["project_id"], row["task_id"] or None, row["node_id"] or None)
+    if r["state"] in ("succeeded", "failed"):
+        with db.tx() as c:
+            c.execute("UPDATE libtv_jobs SET status=?, url=?, seconds=?, error=?, updated_at=? WHERE id=?",
+                      (r["state"], r.get("url") or "", float(r.get("seconds") or 0), r.get("error") or "",
+                       db.now(), jid))
+    return {**r, "usage": {"output_seconds": r.get("seconds")}}
+
+
 async def poll_video(provider: Provider, provider_task_id: str) -> dict:
+    if provider.kind == "libtv" and provider_task_id.startswith("lt_"):   # 真实提交过的 LibTV 任务，不走模拟分支
+        return await _libtv_poll(provider_task_id)
     if not provider.live:
         await asyncio.sleep(0.01)
         try:

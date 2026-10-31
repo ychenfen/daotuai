@@ -31,6 +31,9 @@ class Provider:
         """没有 key 就走 mock，保证本地可运行、可测。AGG_FORCE_MOCK=1 时一律 mock（测试用，绝不花钱）。"""
         if os.environ.get("AGG_FORCE_MOCK", "").strip().lower() in ("1", "true", "yes", "on"):
             return False
+        if self.kind == "libtv":   # LibTV 用 OAuth 登录态，不用 key
+            from . import libtv
+            return self.enabled and libtv.authorized()
         return bool(self.api_key) and self.kind != "mock" and self.enabled
 
 

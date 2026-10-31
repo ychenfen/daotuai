@@ -104,9 +104,11 @@ class Agg:
 
     async def submit_video(self, model: str, prompt: str, resolution: str, duration_s: float,
                            aspect_ratio: str = "9:16", images: list[dict] | None = None,
-                           idem: str | None = None, video: str | None = None) -> dict:
+                           idem: str | None = None, video: str | None = None, project: str | None = None) -> dict:
         body = {"model": model, "prompt": prompt, "resolution": resolution,
                 "duration": duration_s, "aspect_ratio": aspect_ratio}
+        if project:
+            body["project"] = project     # LibTV 用它找/建同名画布
         if images:
             body["images"] = images
         if video:
@@ -122,6 +124,13 @@ class Agg:
         r = await self.c.post(f"/v1/videos/{task_id}/cancel", headers=self._h())
         _raise(r, "video cancel")
         return r.json()
+
+    async def libtv(self, path: str = "status") -> dict:
+        r = await self.c.get(f"/libtv/{path}")
+        try:
+            return r.json()
+        except ValueError:
+            return {"error": r.text[:300]}
 
     async def report(self, days: int = 7) -> dict:
         r = await self.c.get(f"/admin/report?days={days}")

@@ -174,7 +174,7 @@ class VideoMixin:
                 prompt += f"\n避免：{s['prompt']['negative']}"
             try:
                 r = await self._with_topup(lambda: self.agg.submit_video(
-                    model, prompt, res, item["seconds"], aspect, images or None, idem=crid))
+                    model, prompt, res, item["seconds"], aspect, images or None, idem=crid, project=proj["name"]))
             except AggError as e:
                 skipped.append({"shot": s["id"], "code": s["code"], "reason": str(e)[:200]})
                 continue

@@ -220,7 +220,9 @@ function settingsModal() {
   const st = S.p.settings, M = S.models, by = t => M.filter(m => m.type === t), vm = model(st.video_model);
   const sel = (k, vals) => `<select data-k="${k}">${vals.map(([v, t]) => `<option value="${v}" ${String(st[k]) === String(v) ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
   const tog = (k, label) => `<span>${label}</span>${sel(k, [['true', '开'], ['false', '关']])}`;
-  modal(`<h3>生成设置 · ${esc(S.p.name)}</h3><div class="kv">
+  setTimeout(() => libtvBox(false), 0);
+  modal(`<h3>生成设置 · ${esc(S.p.name)}</h3>
+    <div class="card" id="libtvBox" style="margin:0 0 12px">LibTV 连接状态检查中…</div><div class="kv">
     <span>项目名</span><input data-k="name" value="${esc(S.p.name)}">
     <span>画风</span><input data-k="style" value="${esc(S.p.style)}">
     <span>画面比例</span>${sel('aspect_ratio', ['9:16', '16:9', '1:1', '3:4', '4:3'].map(x => [x, x]))}
@@ -239,6 +241,25 @@ function settingsModal() {
     ${tog('gen_frames', '一键时生成分镜图')}${tog('auto_assemble', '一键最后自动合成')}${tog('burn_subtitles', '字幕烧进画面')}
   </div><div class="row" style="margin-top:12px"><span class="muted small">“真实”模型会真实调用并扣费；“模拟”零成本，用来走通流程。超出项目预算的视频不会提交。</span>
   <span class="spacer"></span><button onclick="closeModal(this)">取消</button><button class="primary" onclick="saveSettings(this)">保存</button></div>`);
+}
+async function libtvBox(check) {
+  const box = document.getElementById('libtvBox'); if (!box) return;
+  try {
+    const st = await api('GET', '/api/libtv' + (check ? '?check=true' : ''));
+    const d = st.doctor || {};
+    box.innerHTML = `<div class="row"><b>LibTV</b>${st.authorized ? '<span class="badge ok">已连接</span>' : '<span class="badge">未连接</span>'}
+      <span class="muted small">官方远程 MCP，扣 LibTV 账户积分；视频模型里选 libtv- 开头的即用 LibTV 出片</span><span class="spacer"></span>
+      ${st.authorized ? `<button class="small" onclick="libtvBox(true)">检查连接</button><button class="small danger" onclick="libtvLogout()">断开</button>`
+        : `<a href="${esc(st.login_url)}" target="_blank"><button class="small primary">连接 LibTV</button></a><button class="small" onclick="libtvBox(false)">我已授权，刷新</button>`}</div>
+      ${check ? (d.ok ? `<div class="small ok" style="margin-top:6px">连接正常 · 可用工具 ${d.tools.length} 个 · 准入 ${esc(JSON.stringify((d.doctor || {}).executionAdmission ?? '未返回'))}</div>`
+        : `<div class="small err" style="margin-top:6px">${esc(d.error || '检查失败')}</div>`) : ''}
+      ${!st.authorized ? '<div class="small muted" style="margin-top:6px">点“连接 LibTV”会打开 LibTV 登录授权页，授权完成后回到这里点“我已授权，刷新”。</div>' : ''}`;
+    if (st.authorized && !S.models.some(m => m.id.startsWith('libtv-') && m.live)) S.models = (await api('GET', '/api/models')).items;
+  } catch (e) { box.innerHTML = `<span class="err small">LibTV 状态读取失败：${esc(e.message)}</span>`; }
+}
+async function libtvLogout() {
+  if (!confirm('断开 LibTV？之后选 libtv- 模型将无法真实出片。')) return;
+  await api('POST', '/api/libtv/logout'); S.models = (await api('GET', '/api/models')).items; libtvBox(false);
 }
 async function saveSettings(btn) {
   const body = {};

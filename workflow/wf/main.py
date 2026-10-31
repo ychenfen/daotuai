@@ -149,6 +149,23 @@ async def api_wallet():
     return await wf().agg.wallet()
 
 
+@app.get("/api/libtv")
+async def api_libtv(check: bool = False):
+    """LibTV 连接状态；check=true 时再做一次只读的 doctor（身份、准入、工具列表）。"""
+    from .agg import AGG_BASE
+    st = await wf().agg.libtv("status")
+    st["login_url"] = AGG_BASE.rstrip("/") + "/libtv/login"
+    if check and st.get("authorized"):
+        st["doctor"] = await wf().agg.libtv("doctor")
+    return st
+
+
+@app.post("/api/libtv/logout")
+async def api_libtv_logout():
+    r = await wf().agg.c.post("/libtv/logout")
+    return r.json()
+
+
 @app.get("/api/defaults")
 def api_defaults():
     return DEFAULT_SETTINGS

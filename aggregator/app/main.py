@@ -485,6 +485,69 @@ async def video_cancel(task_id: str, x_user_id: str | None = Header(default=None
     return {"id": task_id, "status": "cancelled", "refund": refunded}
 
 
+# ---------------- LibTV 连接（OAuth 登录在浏览器里完成） ----------------
+
+from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
+
+from . import libtv  # noqa: E402
+
+
+@app.get("/libtv/status")
+def libtv_status():
+    return libtv.status_local()
+
+
+@app.get("/libtv/login")
+async def libtv_login():
+    try:
+        return RedirectResponse(await libtv.begin_login())
+    except Exception as e:  # 网络/注册失败给出可读页面
+        return HTMLResponse(f"<h3>连接 LibTV 失败</h3><p>{str(e)[:500]}</p>", status_code=502)
+
+
+def _page(title: str, body: str) -> HTMLResponse:
+    return HTMLResponse(f"<!doctype html><meta charset=utf-8><title>{title}</title>"
+                        f"<body style='font-family:sans-serif;padding:40px;background:#0d1620;color:#e6edf3'>"
+                        f"<h2>{title}</h2><p>{body}</p></body>")
+
+
+@app.get("/libtv/callback")
+async def libtv_callback(code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    if error:
+        return _page("LibTV 授权没有完成", f"{error}：{error_description}")
+    try:
+        await libtv.finish_login(code, state)
+    except libtv.LibTVError as e:
+        return _page("LibTV 授权失败", str(e))
+    return _page("LibTV 已连接 ✓", "可以关掉这个页面，回到工作台。视频模型里选 LibTV 开头的模型即可用 LibTV 出片。")
+
+
+@app.post("/libtv/logout")
+async def libtv_logout():
+    return await libtv.logout()
+
+
+@app.get("/libtv/doctor")
+async def libtv_doctor():
+    """只读：列出 LibTV 暴露的工具，并调用 doctor（身份、连接、执行准入）。"""
+    try:
+        return {"ok": True, **(await libtv.doctor())}
+    except libtv.LibTVError as e:
+        return JSONResponse(status_code=e.status or 502, content={"ok": False, "error": str(e)})
+
+
+@app.get("/libtv/tools")
+async def libtv_tools():
+    """只读：工具的完整 inputSchema，用于对照校准适配层。"""
+    m = libtv.MCP()
+    try:
+        tools = await m.list_tools()
+    except libtv.LibTVError as e:
+        return JSONResponse(status_code=e.status or 502, content={"error": str(e)})
+    return {"tools": [{"name": t["name"], "description": t.get("description", "")[:500],
+                       "inputSchema": t.get("inputSchema")} for t in tools.values()]}
+
+
 # ---------------- 运维 ----------------
 
 @app.get("/admin/health")

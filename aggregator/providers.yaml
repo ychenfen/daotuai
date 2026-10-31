@@ -24,6 +24,13 @@ providers:
     api_key_env: DASHSCOPE_API_KEY
     concurrency: 4
     timeout_s: 180
+  - id: libtv
+    label: LibTV（官方远程 MCP，OAuth 登录，扣 LibTV 账户积分）
+    kind: libtv
+    base_url: https://mcp.liblib.tv/mcp
+    api_key_env: LIBTV_UNUSED
+    concurrency: 2
+    timeout_s: 600
   # 火山方舟 volcengine_official 见下方
 
   # ---------- 刀徒同款渠道（多数 base_url 为占位，填 key 前先核对地址） ----------

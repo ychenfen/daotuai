@@ -89,6 +89,41 @@ models:
     routes:
       - { provider: volcengine_official, api_id: doubao-seedance-2-0-mini-260615, weight: 1 }
 
+  # ---- LibTV（扣 LibTV 账户积分；这里的价格只用于工作台预算估算）----
+  # api_id 是在 LibTV search_models 里搜的关键词，实际模型标识与参数以 get_model 的实时契约为准。
+  - id: libtv-wan3.0
+    type: video
+    unit: output_second
+    price: { rmb_per_second: { 480P: 0.0, 720P: 0.0, 1080P: 0.0 } }   # 双11 活动期 0 积分（以账户为准）
+    cost: { rmb_per_second: { 480P: 0.0, 720P: 0.0, 1080P: 0.0 } }
+    specs: [480P, 720P, 1080P]
+    duration: { min: 2, max: 15, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考]
+    routes:
+      - { provider: libtv, api_id: Wan 3.0, weight: 1 }
+
+  - id: libtv-seedance-2.5
+    type: video
+    unit: output_second
+    price: { rmb_per_second: { 480P: 0.17, 720P: 0.17, 1080P: 0.40 } }  # 活动宣传 720P 低至 0.17 元/秒（以账户为准）
+    cost: { rmb_per_second: { 480P: 0.17, 720P: 0.17, 1080P: 0.40 } }
+    specs: [480P, 720P, 1080P]
+    duration: { min: 4, max: 15, step: 1 }
+    modes: [文生视频, 首帧参考, 全能参考]
+    routes:
+      - { provider: libtv, api_id: Seedance 2.5, weight: 1 }
+
+  - id: libtv-kling-4.0
+    type: video
+    unit: output_second
+    price: { rmb_per_second: { 720P: 0.0, 1080P: 0.0 } }               # 双11 活动期 0 积分（以账户为准）
+    cost: { rmb_per_second: { 720P: 0.0, 1080P: 0.0 } }
+    specs: [720P, 1080P]
+    duration: { min: 5, max: 10, step: 5 }
+    modes: [文生视频, 首帧参考, 全能参考]
+    routes:
+      - { provider: libtv, api_id: Kling 4.0, weight: 1 }
+
   # ---- 阿里百炼 · 万相 3.0（全能参考：首帧 / 多参考图 / 参考音频；原生音频；官方价 480P 0.3 元/秒，常有 7 折与免费额度）----
   - id: wan3.0-video
     type: video
