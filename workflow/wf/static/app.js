@@ -1092,6 +1092,7 @@ function pgEdit() {
     <span class="badge ok">通过 ${n('approved')}</span><span class="badge bad">打回 ${n('rejected')}</span><span class="badge">未审 ${n('')}</span>
     <span class="spacer"></span><button onclick="retakeEpisode(this,${e.no})">重抽不合格/打回的</button>
     <button class="primary" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?episode_no=${e.no}&allow_partial=true'),'已按剪辑合成本集')">按剪辑合成本集</button>
+    <button onclick="jyDraft(${e.no})" title="片段修剪、叠化、配音、配乐、字幕都带上，剪映里接着精修">导出剪映草稿</button>
     ${e.final_url ? `<a href="${esc(e.final_url)}" target="_blank"><button>看成片</button></a>` : ''}</div>
     <div class="small muted" style="margin-top:6px">模型出片常见“起势慢、收尾拖”：用片头/片尾剪掉多余的部分，镜头之间可选叠化。颜色：绿=质检合格，黄=待看，红=不合格或打回，灰=还没出片。</div>
     <div class="timeline">${shots.map(s => `<div class="tl-clip" title="${s.code}" style="flex:${keptSec(s)};border-color:${col(s)}" onclick="document.getElementById('cut-${s.id}').scrollIntoView({behavior:'smooth',block:'center'})">
@@ -1115,6 +1116,14 @@ function cutRow(s) {
       ${s.dub ? `<div class="small muted" style="margin-top:4px">配音：${s.dub.lines.map(x => `${x.start.toFixed(1)}-${x.end.toFixed(1)}s ${esc(x.speaker)}`).join('，')}（剪辑不要剪到台词）</div>` : ''}
       ${j.qc && j.qc.issues.length ? `<div class="small warnc" style="margin-top:4px">质检：${esc(j.qc.issues.slice(0, 2).map(i => i.detail).join('；'))}</div>` : ''}
       ${reviewBar(j)}</div></div></div>`;
+}
+function jyDraft(no) {
+  let t = ''; try { t = localStorage.getItem('jyTarget') || ''; } catch (e) { /* 忽略 */ }
+  t = prompt('素材准备放在电脑哪个文件夹？（剪映要求绝对路径，解压时放到这里）', t || 'D:/剪映素材');
+  if (t === null) return;
+  try { localStorage.setItem('jyTarget', t); } catch (e) { /* 忽略 */ }
+  location.href = `${BASE}/projects/${S.pid}/jianying-draft?episode_no=${no}&target=${encodeURIComponent(t)}`;
+  toast('正在生成剪映草稿，下载开始后按压缩包里的“导入说明”操作');
 }
 async function setCut(sid, body) {
   const r = await act(null, () => api('POST', `/shots/${sid}/cut`, body), r => `已保存：保留 ${r.kept_seconds}s`);
@@ -1144,6 +1153,7 @@ function pgFinal() {
     <div class="row" style="margin-top:8px"><button class="small" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?episode_no=${e.no}'),'已合成')">合成本集</button>
       <button class="small" onclick="S.ep=${e.no};go('videos')">去视频页</button>
       <button class="small" onclick="dubEpisode(this,${e.no})">配音本集</button><button class="small" onclick="qcEpisode(this,${e.no})">质检本集</button>
+      <button class="small" onclick="jyDraft(${e.no})">剪映草稿</button>
       <button class="small" onclick="genCovers(this,${e.no})">${e.cover_url ? '重做封面' : '生成封面'}</button></div>
     <div class="row small" style="margin-top:8px"><span class="muted">发布导出</span>
       <select id="xp-${e.no}">${EXPORTS.map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>

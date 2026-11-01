@@ -205,6 +205,20 @@ class ReviewMixin:
                     f"{r['width']}×{r['height']} · {r['seconds']:.1f}s · {r['bytes'] / 1048576:.1f} MB")
         return {"project": pid, "episode": episode_no, "preset": preset, "url": media.url_of(out), **r}
 
+    async def build_jianying(self, pid: str, episode_no: int, target_root: str = "") -> tuple[str, str]:
+        """导出剪映草稿（zip）。字幕用本集合成时生成的 SRT（没合成过就先合成一次，本地 ffmpeg，不花钱）。"""
+        from . import jianying
+        proj = self.get(pid)
+        ep = next((e for e in proj["episodes"] if e["no"] == episode_no), None)
+        if not ep:
+            raise NotFound(f"第 {episode_no} 集不存在")
+        if not ep.get("srt_path") or not os.path.exists(ep["srt_path"]):
+            await self.assemble(pid, episode_no, allow_partial=True)
+            proj = self.get(pid)
+            ep = next(e for e in proj["episodes"] if e["no"] == episode_no)
+        shots = [s for s in proj["shots"] if s["episode_id"] == ep["id"]]
+        return jianying.build_draft(proj, ep, shots, target_root, ep.get("srt_path") or "")
+
     # ==================================================================
     # 剪辑精修：入点/出点、叠化
     # ==================================================================

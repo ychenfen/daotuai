@@ -1214,6 +1214,33 @@ async def main() -> int:
         check("正常结束的任务不能续跑 400", r.status_code == 400, r.text[:100])
         await Wv.drain_background()
 
+        print("\n[S4] 剪映草稿导出")
+        try:
+            import pyJianYingDraft  # noqa: F401
+            has_jy = True
+        except ImportError:
+            has_jy = False
+        if HAS_FFMPEG and has_jy:
+            import zipfile as _zf2
+            rz = await c.get(f"/projects/{pid}/jianying-draft?episode_no=1&target=D:/剪映素材")
+            check("剪映草稿：返回 zip", rz.status_code == 200 and rz.content[:2] == b"PK", rz.text[:200] if rz.status_code != 200 else "")
+            zp2 = os.path.join(TMP, "jy.zip")
+            open(zp2, "wb").write(rz.content)
+            with _zf2.ZipFile(zp2) as z:
+                names = z.namelist()
+                content = next(z.read(n).decode("utf-8") for n in names if n.endswith("draft_content.json"))
+            dc = json.loads(content)
+            vids = [m for m in dc["materials"]["videos"]]
+            check("剪映草稿：含草稿文件、素材、说明；素材路径改写到电脑目标文件夹",
+                  any(n.endswith("draft_meta_info.json") for n in names) and any("/素材/" in n and n.endswith(".mp4") for n in names)
+                  and any(n.endswith("导入说明.txt") for n in names) and vids and all(v["path"].startswith("D:/剪映素材/") for v in vids),
+                  json.dumps([v["path"] for v in vids][:2], ensure_ascii=False))
+            tracks = {t["name"]: t for t in dc["tracks"]}
+            check("剪映草稿：画面轨片段数 = 已出片镜头数，有字幕轨", "画面" in tracks and len(tracks["画面"]["segments"]) >= 1
+                  and any(t["type"] == "text" for t in dc["tracks"]), json.dumps(list(tracks))[:200])
+        else:
+            print("  （没装 pyJianYingDraft 或 ffmpeg，跳过）")
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

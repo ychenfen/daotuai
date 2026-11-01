@@ -2,3 +2,4 @@ fastapi>=0.135
 uvicorn>=0.42
 httpx>=0.28
 PyYAML>=6.0
+pyJianYingDraft>=0.3.1   # 剪映草稿导出（生成新草稿；剪映 10.8 实测可用）

@@ -262,6 +262,12 @@ def edit_package(pid: str, background: BackgroundTasks, episode_no: int | None =
     return _download(path, name, background)
 
 
+@app.get("/projects/{pid}/jianying-draft")
+async def jianying_draft(pid: str, background: BackgroundTasks, episode_no: int = 1, target: str = ""):
+    path, name = await wf().build_jianying(pid, episode_no, target)
+    return _download(path, name, background)
+
+
 @app.patch("/projects/{pid}/settings")
 def update_settings(pid: str, body: dict = Body(...)):
     return wf().update_settings(pid, body)
