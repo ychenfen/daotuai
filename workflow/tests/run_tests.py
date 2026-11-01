@@ -860,6 +860,24 @@ async def main() -> int:
             os.environ["WORKFLOW_LLM"] = "mock"
             W.agg.chat = orig_chat
         check("模型改丢了 @ 引用 → 退回本地规则", src == "mock" and "@孔宣" in newp, newp[:100])
+        fl = wfllm._fix_line({"type": "画面不符", "detail": "分镜要求孔宣盯着‘屏幕’，但成片中角色手持手机，且无交易界面"}, [])
+        check("改提示词只写要求、不把错误画面写进去", fl == "必须清楚演出：孔宣盯着‘屏幕’" and "手机" not in fl, fl)
+        W.agg.chat = None
+
+        async def extra_chat(model, messages, **kw):
+            return {"choices": [{"message": {"content": json.dumps({"positive": "参考资产：@孔宣、@交易所大屏 画面：@孔宣盯着电脑屏幕" * 3,
+                                                                  "changes": ["加了屏幕"]}, ensure_ascii=False)}}], "billing": {"charged_rmb": 0}}
+        W.agg.chat = extra_chat
+        try:
+            os.environ["WORKFLOW_LLM"] = "auto"
+            p_ok, _, s_ok = await wfllm.revise_prompt(W.agg, "x", "参考资产：@孔宣 画面", [{"type": "画面不符", "detail": "d"}], ["孔宣"],
+                                                     known=["孔宣", "交易所大屏"])
+            p_no, _, s_no = await wfllm.revise_prompt(W.agg, "x", "参考资产：@孔宣 画面", [{"type": "画面不符", "detail": "d"}], ["孔宣"],
+                                                     known=["孔宣"])
+        finally:
+            os.environ["WORKFLOW_LLM"] = "mock"
+            W.agg.chat = orig_chat
+        check("模型新增的 @ 是资产表里的名字 → 接受；不认识的 → 退回本地规则", s_ok == "real" and s_no == "mock", f"{s_ok}/{s_no}")
         # 拆卡
         tgt = next(s for s in st["shots"] if s["episode_no"] == 1 and not any(x["status"] in ("submitted", "running") for x in s["jobs"]))
         await c.patch(f"/shots/{tgt['id']}", json={"expected_rev": tgt["rev"], "fields": {

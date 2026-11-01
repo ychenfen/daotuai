@@ -509,6 +509,8 @@ class VideoMixin:
                               (url, local, poster, seconds, charged, db.now(), j["id"]))
                     c.execute("UPDATE shots SET status='video_done', selected_job_id=? WHERE id=?",
                               (j["id"], j["shot_id"]))
+                    c.execute("UPDATE episodes SET final_path='', srt_path='', final_seconds=0 WHERE id="
+                              "(SELECT episode_id FROM shots WHERE id=?)", (j["shot_id"],))   # 换了版本，旧成片作废
                 done.append({"job": j["id"], "shot": j["shot_id"], "code": code, "url": url, "local": bool(local),
                              "charged_rmb": charged})
                 projects.setdefault(j["project_id"], []).append(("ok", code))

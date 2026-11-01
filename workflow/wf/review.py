@@ -81,7 +81,8 @@ class ReviewMixin:
         llm.current_project.set(pid)
         outs = await self.gather_limited(
             llm.revise_prompt(self.agg, st["text_model"], s["prompt"]["positive"], issues,
-                              [c for c in (s.get("characters") or [])], engine or st["engine"])
+                              [c for c in (s.get("characters") or [])], engine or st["engine"],
+                              [a["name"] for a in proj["assets"]])
             for s, _, issues in targets)
         plan = {}
         with db.tx() as c:
@@ -130,6 +131,8 @@ class ReviewMixin:
             better = new_q["score"] >= old_q["score"]
             chosen = j["id"] if better else old["id"]
             c.execute("UPDATE shots SET selected_job_id=? WHERE id=?", (chosen, j["shot_id"]))
+            c.execute("UPDATE episodes SET final_path='', srt_path='', final_seconds=0 WHERE id="
+                      "(SELECT episode_id FROM shots WHERE id=?)", (j["shot_id"],))
         return {"shot": j["shot_id"], "new": job_id, "new_score": new_q["score"], "old": old["id"],
                 "old_score": old_q["score"], "kept": "new" if better else "old",
                 "new_version": j["version"], "old_version": old["version"]}

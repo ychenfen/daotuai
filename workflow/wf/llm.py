@@ -702,7 +702,8 @@ REVISE_SYSTEM = """你是 AI 视频提示词修改师。给你一条视频提示
 - 字幕水印：强调画面不出现任何文字、字幕、水印；
 - 角色不一致：强调外观与 @角色 参考一致（发型、服装、配色）；
 - 画面崩坏：降低动作幅度，减少同时运动的人数。
-保留原有结构和所有「@名字」「@名字（形态）」写法，不新增 @，不删除 @。只输出 JSON：
+- 要求屏幕/纸面上出现的具体文字或数字：视频模型画不准，改写成看得见的画面（如“电脑屏幕上是红绿交替的交易界面”），文字留给后期贴字；
+保留原有结构和所有「@名字」「@名字（形态）」写法，不删除 @；只能引用资产表里已有的名字。只输出 JSON：
 {"positive":"改好的完整提示词","changes":["改了什么（一句话）"]}"""
 
 _MENTION_RE = re.compile(r"@[^\s@，,、；;：:。！？!?{}【】<>“”\"]+")
@@ -720,7 +721,14 @@ def _fix_line(issue: dict, characters: list[str]) -> str:
         return "角色外观（发型、服装、配色、体型）严格与参考一致，全程不变"
     if t == "画面崩坏":
         return "动作幅度适中、速度放慢，人物五官和肢体保持正常"
-    return f"必须清楚演出：{d}" if d else ""
+    if not d:
+        return ""
+    # 质检描述多是“分镜要求 X，但成片 Y”：只把要求 X 写进提示词，别把错误画面 Y 也写进去（实测会被模型照着演）
+    m = re.search(r"分镜要求[：:]?\s*(.+?)[，,；;]\s*(?:但|而|然而)", d)
+    if m:
+        return f"必须清楚演出：{m.group(1).strip()}"
+    head = re.split(r"[，,；;]\s*(?:但|而|然而)|但成片|成片中", d)[0].strip()
+    return f"必须清楚演出：{head or d}"
 
 
 def mock_revise(prompt: str, issues: list[dict], characters: list[str]) -> tuple[str, list[str]]:
@@ -740,8 +748,12 @@ def mock_revise(prompt: str, issues: list[dict], characters: list[str]) -> tuple
     return f"{base}\n{block}", lines
 
 
+def _mention_base(m: str) -> str:
+    return re.sub(r"[（(].*$", "", m.lstrip("@"))
+
+
 async def revise_prompt(agg: Agg, model: str, prompt: str, issues: list[dict], characters: list[str],
-                        engine: str | None = None) -> tuple[str, list[str], str]:
+                        engine: str | None = None, known: list[str] | None = None) -> tuple[str, list[str], str]:
     """返回 (新提示词, 改动说明, 来源 real/mock)。模型改坏了 @ 引用就退回本地规则。"""
     if use_model(engine) and issues:
         try:
@@ -749,11 +761,17 @@ async def revise_prompt(agg: Agg, model: str, prompt: str, issues: list[dict], c
                     "\n".join(f"- [{i.get('severity', '')}{i.get('type', '')}] {i.get('detail', '')}" for i in issues))
             data = await _ask_json(agg, model, REVISE_SYSTEM, user, 2500)
             new = str((data or {}).get("positive") or "").strip()
-            if new and set(_MENTION_RE.findall(new)) == set(_MENTION_RE.findall(prompt)) and len(new) > len(prompt) * 0.6:
+            old_m, new_m = set(_MENTION_RE.findall(prompt)), set(_MENTION_RE.findall(new))
+            allowed = set(known or []) | {_mention_base(x) for x in old_m}
+            # 中文里 @名字 后面常直接接动作（“@孔宣盯着屏幕”），按“以已知名字开头”判断，和 refs.resolve 的最长匹配一致
+            extra = {x for x in new_m - old_m if not any(_mention_base(x).startswith(n) for n in allowed if n)}
+            lost = {x for x in old_m if not any(y.startswith(x) for y in new_m)}
+            if new and not lost and not extra and len(new) > len(prompt) * 0.6:
                 if SUFFIX in prompt and SUFFIX not in new:
                     new = new.rstrip() + "\n" + SUFFIX
                 return new, [str(x) for x in (data.get("changes") or [])][:6], "real"
-            log.warning("revise_prompt: 模型输出不合格（@ 引用变了或太短），改用本地规则")
+            log.warning("revise_prompt: 模型输出不合格，改用本地规则：丢了 %s，新增未知 %s，长度 %d/%d",
+                        sorted(lost), sorted(extra), len(new), len(prompt))
         except AggError as e:
             if _strict(engine):
                 raise
