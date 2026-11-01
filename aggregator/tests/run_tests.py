@@ -249,6 +249,24 @@ async def main() -> int:
         check("视觉消息：图片按 token 估价（不把 base64 当文字）", r.status_code == 200
               and rj["billing"]["quoted_rmb"] < 0.01, json.dumps(rj.get("billing"))[:200])
 
+        print("\n[J] 账单对账")
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        today = (_dt.now(_tz.utc) + _td(hours=8)).strftime("%Y-%m-%d")
+        csv_text = ("阿里云账单明细（示例说明行）\n账单日期,产品名称,计费项,应付金额\n"
+                    f"{today},阿里云百炼,万相视频生成,1.20\n{today} 10:00:00,阿里云百炼,通义千问,0.05\n"
+                    f"{today},云服务器 ECS,实例,30.00\n")
+        r = await c.post("/admin/reconcile?account=aliyun", content=csv_text.encode("gb18030"))
+        rj = r.json()
+        day = next((d for d in rj.get("days", []) if d["date"] == today), None)
+        check("对账：GBK 账单、跳过说明行、只算 AI 相关行", r.status_code == 200 and rj["bill_rows"] == 2
+              and rj["skipped_rows"] == 1 and abs(rj["bill_total"] - 1.25) < 1e-6, json.dumps(rj, ensure_ascii=False)[:300])
+        check("对账：当天和我们账本（百炼渠道估算成本）并排、给出建议", day and day["our_cost_rmb"] > 0 and day["calls"] >= 1
+              and rj["advice"], json.dumps(day, ensure_ascii=False))
+        r = await c.post("/admin/reconcile?account=aliyun", content="a,b\n1,2\n".encode())
+        check("对账：认不出表头 400", r.status_code == 400, r.text[:100])
+        r = await c.post("/admin/reconcile?account=xx", content=csv_text.encode())
+        check("对账：未知账户 400", r.status_code == 400, "")
+
         print("\n[H] 配置一致性")
         from app.config import candidates
         check("seedance-2.5 线路 10 条", len(candidates("seedance-2.5")) == 10,

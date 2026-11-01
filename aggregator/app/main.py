@@ -637,6 +637,16 @@ def admin_report(days: int = 7):
     return billing.report(days)
 
 
+@app.post("/admin/reconcile")
+async def admin_reconcile(request: Request, account: str = "aliyun"):
+    """上传费用中心导出的账单 CSV（请求体就是文件内容），按天对比我们账本里的估算成本。"""
+    from . import reconcile
+    try:
+        return reconcile.reconcile(await request.body(), account)
+    except reconcile.BillError as e:
+        return bad(str(e), 400, code="bad_bill")
+
+
 @app.post("/admin/reap")
 def admin_reap(older_than_minutes: int = 60, dry_run: bool = False):
     return billing.reap_orphans(older_than_minutes, dry_run)

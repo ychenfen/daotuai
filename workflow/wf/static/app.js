@@ -178,7 +178,7 @@ function pgHome() {
       <button class="primary" style="margin-top:14px" onclick="S.pid?go('script'):toast('先新建或选择项目',true)">开始制作 →</button></div>
     <div class="card"><div class="muted small">独立创作模块</div><h2>一键剧本</h2><div class="muted">从小说、故事或一句灵感，创作分集剧本。</div>
       <button class="primary" style="margin-top:14px" onclick="scriptGenModal()">开始创作 ↗</button></div></div>
-  <div class="card" id="storageBox"><div class="row"><h3 style="margin:0">存储与运行状态</h3><span class="spacer"></span><button class="small" onclick="loadStorage()">查看</button></div>
+  <div class="card" id="storageBox"><div class="row"><h3 style="margin:0">存储与运行状态</h3><span class="spacer"></span><button class="small" onclick="reconcileModal()">账单对账</button><button class="small" onclick="loadStorage()">查看</button></div>
     <div class="small muted">各项目素材占用、磁盘余量、数据库备份；可清理没选用的旧视频版本。</div></div>`;
 }
 const mb = b => (b / 1048576).toFixed(b > 1073741824 ? 0 : 1) + ' MB';
@@ -187,7 +187,7 @@ async function loadStorage() {
   try {
     const [s, o] = await Promise.all([api('GET', '/api/storage'), api('GET', '/api/ops')]);
     const d = s.disk || {};
-    box.innerHTML = `<div class="row"><h3 style="margin:0">存储与运行状态</h3><span class="spacer"></span><button class="small" onclick="loadStorage()">刷新</button></div>
+    box.innerHTML = `<div class="row"><h3 style="margin:0">存储与运行状态</h3><span class="spacer"></span><button class="small" onclick="reconcileModal()">账单对账</button><button class="small" onclick="loadStorage()">刷新</button></div>
       <div class="row small" style="margin-top:6px"><span class="badge ${d.used_pct > 85 ? 'bad' : d.used_pct > 70 ? 'warn' : 'ok'}">磁盘已用 ${d.used_pct ?? '?'}% · 剩 ${d.free ? mb(d.free) : '?'}</span>
         <span class="badge">素材共 ${mb(s.total_bytes)}</span><span class="badge">在跑视频 ${o.running_jobs}</span><span class="badge">后台任务 ${o.running_tasks}</span>
         <span class="badge">备份 ${o.backups} 份${o.last_backup ? ' · 最近 ' + esc(o.last_backup) : ''}</span><span class="badge">已运行 ${(o.uptime_s / 3600).toFixed(1)} 小时</span>
@@ -197,6 +197,23 @@ async function loadStorage() {
       ${s.projects.map(p => `<tr><td>${esc(p.name)}</td><td>${mb(p.bytes)}</td><td class="muted">${Object.entries(p.parts).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${esc(k)} ${mb(v)}`).join(' · ')}</td>
         <td>${p.orphan ? '' : `<button class="small" onclick="cleanupProj('${p.project}','${esc(p.name)}',this)">清理旧版本</button>`}</td></tr>`).join('')}</table>`;
   } catch (e) { toast(e.message, true); }
+}
+function reconcileModal() {
+  modal(`<div class="row"><h3 style="margin:0">账单对账</h3><span class="spacer"></span><button onclick="closeModal(this)">✕</button></div>
+    <div class="small muted" style="margin-top:6px">从费用中心导出账单明细 CSV（阿里云：费用与成本 → 账单详情 → 导出；火山引擎：费用中心 → 账单明细 → 导出；DeepSeek：用量信息 → 导出），
+      按天和工作台按官方单价估算的成本对比。只统计 AI 相关的行（ECS 等其他产品自动跳过）。</div>
+    <div class="row" style="margin-top:10px"><select id="rcAcc"><option value="aliyun">阿里云（百炼）</option><option value="volcengine">火山引擎（方舟）</option><option value="deepseek">DeepSeek</option></select>
+      <button class="primary" onclick="runReconcile(this)">选择账单 CSV…</button></div><div id="rcOut" style="margin-top:10px"></div>`);
+}
+async function runReconcile(btn) {
+  const [f] = await pickFile('.csv,text/csv'); if (!f) return;
+  const r = await act(btn, () => api('POST', `/api/reconcile?account=${$('#rcAcc').value}`, undefined, f), r => `对账完成：${r.range.join(' ~ ')}`);
+  if (!r) return;
+  $('#rcOut').innerHTML = `<div class="row small"><span class="badge">账单 ${rmb(r.bill_total)}</span><span class="badge">我们估算 ${rmb(r.our_total)}</span>
+    <span class="badge ${Math.abs(r.diff_total) > Math.max(1, r.our_total * 0.1) ? 'warn' : 'ok'}">差 ${rmb(r.diff_total)}${r.ratio ? `（${r.ratio}×）` : ''}</span><span class="muted">${esc(r.advice)}</span></div>
+    <div class="small muted" style="margin-top:4px">认到的列：日期「${esc(r.columns.date)}」金额「${esc(r.columns.amount)}」产品「${esc(r.columns.item || '无')}」；AI 相关 ${r.bill_rows} 行，跳过 ${r.skipped_rows} 行（${rmb(r.skipped_rmb)}）</div>
+    <table class="small" style="width:100%;margin-top:8px"><tr class="muted"><td>日期</td><td>账单</td><td>我们估算</td><td>调用次数</td><td>差额</td></tr>
+    ${r.days.map(d => `<tr class="${d.flag ? 'warnc' : ''}"><td>${d.date}</td><td>${rmb(d.bill_rmb)}</td><td>${rmb(d.our_cost_rmb)}</td><td>${d.calls}</td><td>${rmb(d.diff_rmb)}${d.flag ? ' ⚠' : ''}</td></tr>`).join('')}</table>`;
 }
 async function cleanupProj(pid, name, btn) {
   const pv = await api('POST', `/projects/${pid}/cleanup`, {dry_run: true, keep_versions: 1});

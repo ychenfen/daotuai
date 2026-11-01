@@ -611,6 +611,12 @@ def lock_project(pid: str, body: dict = Body(default={})):
     return wf().lock_project(pid, bool(body.get("locked", True)), body.get("kinds"))
 
 
+@app.post("/api/reconcile")
+async def api_reconcile(request: Request, account: str = "aliyun"):
+    r = await wf().agg.c.post("/admin/reconcile", params={"account": account}, content=await request.body())
+    return JSONResponse(r.json(), status_code=r.status_code)
+
+
 @app.get("/api/storage")
 def storage():
     return wf().storage()
