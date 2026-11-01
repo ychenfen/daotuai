@@ -294,6 +294,10 @@ MIGRATIONS = [
     ("shots", "dub_path", "TEXT NOT NULL DEFAULT ''"),            # 本镜配音轨（wav）
     ("shots", "dub_json", "TEXT NOT NULL DEFAULT ''"),            # 配音分句与时间
     ("projects", "audio_charged_rmb", "REAL NOT NULL DEFAULT 0"), # 配音/试听花费
+    ("jobs", "retake_of", "TEXT NOT NULL DEFAULT ''"),            # 按质检意见重抽：原版本 job id
+    ("jobs", "retake_json", "TEXT NOT NULL DEFAULT ''"),          # 重抽依据（问题、改动、来源）
+    ("jobs", "review", "TEXT NOT NULL DEFAULT ''"),               # 审片：'' 未审 | approved | rejected
+    ("jobs", "review_note", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 

@@ -771,6 +771,118 @@ async def main() -> int:
             await c.patch(f"/projects/{pid}/settings", json={"dub_mode": "off"})
             check("清除配音", cl["cleared"] >= 1, json.dumps(cl))
 
+        print("\n[Z] 质量闭环：按质检意见重抽 / 版本择优 / 审片 / 动作过密与拆卡")
+        from wf import llm as wfllm, db as wfdbz  # noqa: E402
+        dense = {"duration_s": 5, "picture": "【0-1秒】甲转身【1-2秒】乙拔剑【2-3.5秒】甲后跳【3.5-5秒】乙追", "dialogue": ""}
+        ok_shot = {"duration_s": 6, "picture": "【0-3秒】甲转身【3-6秒】乙拔剑", "dialogue": "甲：站住！"}
+        check("动作过密检查：5 秒 4 段 / 时间段太短 → 提示；正常卡无提示",
+              any("过密" in x for x in wfllm.shot_density(dense)) and any("太短" in x for x in wfllm.shot_density(dense))
+              and wfllm.shot_density(ok_shot) == [], str(wfllm.shot_density(dense)))
+        p1, ch1 = wfllm.mock_revise("参考资产：@孔宣\n画面：…\n" + wfllm.SUFFIX,
+                                    [{"type": "画面不符", "detail": "抬头动作没演出来"}, {"type": "多余人物", "detail": "x"}], ["孔宣"])
+        p2, _ = wfllm.mock_revise(p1, [{"type": "字幕水印", "detail": "y"}], ["孔宣"])
+        check("本地改提示词：插在结尾约束前、再次修改替换不叠加",
+              p1.count("【质检修正】") == 1 and "抬头动作没演出来" in p1 and "只有 @孔宣" in p1
+              and p1.rstrip().endswith(wfllm.SUFFIX) and p2.count("【质检修正】") == 1 and "抬头" not in p2, p1[-160:])
+
+        st = await j(await c.get(f"/projects/{pid}"))
+        done = [s for s in st["shots"] if s["episode_no"] == 1 and s["prompt"] and s["job"]
+                and s["job"]["status"] == "succeeded"]
+        a, b = done[0], done[1]
+        r = await c.post(f"/jobs/{b['job']['id']}/review", json={"status": "rejected"})
+        check("打回必须写原因", r.status_code == 400, str(r.status_code))
+        await j(await c.post(f"/jobs/{b['job']['id']}/review", json={"status": "rejected", "note": "表情太平，要更震惊"}))
+        bad_qc = {"score": 50, "verdict": "fail", "checks": [], "summary": "动作没演出来",
+                  "issues": [{"type": "画面不符", "severity": "严重", "detail": "关键动作‘跳起来’缺失"}], "frames": []}
+        with wfdbz.tx() as cc:
+            cc.execute("UPDATE jobs SET qc_json=? WHERE id=?", (json.dumps(bad_qc, ensure_ascii=False), a["job"]["id"]))
+        rt = await j(await c.post(f"/projects/{pid}/retake", json={"episode_no": 1}))
+        codes = sorted(x["code"] for x in rt["submitted"])
+        check("重抽：质检不合格 + 审片打回的镜头都重抽", codes == sorted([a["code"], b["code"]]),
+              json.dumps(rt, ensure_ascii=False)[:300])
+        st = await j(await c.get(f"/projects/{pid}"))
+        sa = next(s for s in st["shots"] if s["id"] == a["id"])
+        sb = next(s for s in st["shots"] if s["id"] == b["id"])
+        nj = sa["jobs"][-1]
+        check("重抽：质检问题写进提示词、新版本记着原版本和依据",
+              "跳起来" in sa["prompt"]["positive"] and nj["version"] == max(x["version"] for x in a["jobs"]) + 1
+              and nj["retake"]["from_job"] == a["job"]["id"] and nj["retake"]["from_score"] == 50,
+              json.dumps({"has": "跳起来" in sa["prompt"]["positive"], "v": nj["version"], "old": a["job"]["version"],
+                          "jobs": [(x["version"], x["status"]) for x in sa["jobs"]]}, ensure_ascii=False)[:300])
+        check("重抽：审片意见也写进提示词", "更震惊" in sb["prompt"]["positive"], sb["prompt"]["positive"][-120:])
+        r = await c.post(f"/projects/{pid}/retake", json={"episode_no": 1})
+        check("在生成中的镜头不会重复重抽", r.status_code == 400, r.text[:120])
+        await wf_main.wf().wait_videos(pid, timeout_s=30, interval_s=0.05)
+        await wf_main.wf().drain_background()
+        # 版本择优：新版本分更低 → 改回原版本
+        W = wf_main.wf()
+        worse = dict(bad_qc, score=30)
+        with wfdbz.tx() as cc:
+            cc.execute("UPDATE jobs SET qc_json=? WHERE id=?", (json.dumps(worse, ensure_ascii=False), nj["id"]))
+        cmp_ = W.keep_better(nj["id"])
+        st = await j(await c.get(f"/projects/{pid}"))
+        check("重抽版本更差 → 自动保留原版本", cmp_["kept"] == "old"
+              and next(s for s in st["shots"] if s["id"] == a["id"])["selected_job_id"] == a["job"]["id"], json.dumps(cmp_))
+        good = dict(bad_qc, score=88, verdict="pass", issues=[])
+        with wfdbz.tx() as cc:
+            cc.execute("UPDATE jobs SET qc_json=? WHERE id=?", (json.dumps(good, ensure_ascii=False), nj["id"]))
+        check("重抽版本更好 → 选用新版本", W.keep_better(nj["id"])["kept"] == "new", "")
+        # 自动重抽：开关、次数上限
+        await c.patch(f"/projects/{pid}/settings", json={"auto_retake": True, "retake_max": 1})
+        with wfdbz.tx() as cc:
+            cc.execute("UPDATE jobs SET qc_json=? WHERE id=?", (json.dumps(bad_qc, ensure_ascii=False), nj["id"]))
+        await W.after_auto_qc(pid, [(nj["id"], bad_qc)])
+        st = await j(await c.get(f"/projects/{pid}"))
+        check("自动重抽：已重抽过 1 次（上限 1）不再抽", len(next(s for s in st["shots"] if s["id"] == a["id"])["jobs"]) == len(sa["jobs"]),
+              "")
+        c_shot = next(s for s in st["shots"] if s["id"] not in (a["id"], b["id"]) and s["prompt"] and s["job"]
+                      and s["job"]["status"] == "succeeded" and not s["job"].get("retake"))
+        with wfdbz.tx() as cc:
+            cc.execute("UPDATE jobs SET qc_json=? WHERE id=?", (json.dumps(bad_qc, ensure_ascii=False), c_shot["job"]["id"]))
+        await W.after_auto_qc(pid, [(c_shot["job"]["id"], bad_qc)])
+        st = await j(await c.get(f"/projects/{pid}"))
+        cj = next(s for s in st["shots"] if s["id"] == c_shot["id"])["jobs"][-1]
+        check("自动重抽：不合格且没抽过的镜头自动重抽", cj["retake"] and cj["retake"]["auto"], json.dumps(cj.get("retake"), ensure_ascii=False)[:160])
+        await c.patch(f"/projects/{pid}/settings", json={"auto_retake": False})
+        await W.wait_videos(pid, timeout_s=30, interval_s=0.05)
+        await W.drain_background()
+        # 模型改坏 @ 引用 → 退回本地规则
+        orig_chat = W.agg.chat
+
+        async def bad_chat(model, messages, **kw):
+            return {"choices": [{"message": {"content": json.dumps({"positive": "完全重写，没有任何引用" * 20, "changes": []}, ensure_ascii=False)}}],
+                    "billing": {"charged_rmb": 0}}
+        W.agg.chat = bad_chat
+        try:
+            os.environ["WORKFLOW_LLM"] = "auto"
+            newp, _, src = await wfllm.revise_prompt(W.agg, "x", "参考资产：@孔宣 画面", [{"type": "画面不符", "detail": "d"}], ["孔宣"])
+        finally:
+            os.environ["WORKFLOW_LLM"] = "mock"
+            W.agg.chat = orig_chat
+        check("模型改丢了 @ 引用 → 退回本地规则", src == "mock" and "@孔宣" in newp, newp[:100])
+        # 拆卡
+        tgt = next(s for s in st["shots"] if s["episode_no"] == 1 and not any(x["status"] in ("submitted", "running") for x in s["jobs"]))
+        await c.patch(f"/shots/{tgt['id']}", json={"expected_rev": tgt["rev"], "fields": {
+            "picture": "【0-1秒】孔宣抬头【1-2秒】孔宣伸手【2-3秒】股民乙跳起来【3-5秒】孔宣冷笑",
+            "dialogue": "孔宣：三日之内。\n股民乙：涨了！", "duration_s": 5}})
+        st = await j(await c.get(f"/projects/{pid}"))
+        tgt = next(s for s in st["shots"] if s["id"] == tgt["id"])
+        dn = await j(await c.get(f"/projects/{pid}/density?episode_no=1"))
+        check("项目动作过密清单里有这张卡", any(x["shot"] == tgt["id"] for x in dn["items"]), json.dumps(dn, ensure_ascii=False)[:200])
+        n_before = sum(1 for s in st["shots"] if s["episode_no"] == 1)
+        sp = await j(await c.post(f"/shots/{tgt['id']}/split"))
+        st = await j(await c.get(f"/projects/{pid}"))
+        s1 = next(s for s in st["shots"] if s["id"] == sp["split"])
+        s2 = next(s for s in st["shots"] if s["id"] == sp["new"])
+        check("拆卡：一分为二、新卡紧跟在后、时间轴从 0 重排、台词各一半",
+              sum(1 for s in st["shots"] if s["episode_no"] == 1) == n_before + 1 and s2["shot_no"] == s1["shot_no"] + 1
+              and s1["picture"].startswith("【0-1秒】") and s2["picture"].startswith("【0-1秒】股民乙跳起来")
+              and s1["dialogue"] == "孔宣：三日之内。" and s2["dialogue"] == "股民乙：涨了！"
+              and s1["prompt"] is None and s1["selected_job_id"] == "", json.dumps([s1["picture"], s2["picture"]], ensure_ascii=False))
+        sp2 = await j(await c.post(f"/shots/{sp['new']}/split"))
+        r = await c.post(f"/shots/{sp2['new']}/split")
+        check("只剩一段一句的卡不能再拆", r.status_code == 400, r.text[:100])
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

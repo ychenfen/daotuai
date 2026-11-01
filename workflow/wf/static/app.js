@@ -261,7 +261,8 @@ function settingsModal() {
     <span>配音模型</span><select data-k="tts_model">${opt(by('tts'), st.tts_model)}</select>
     <span>质检视觉模型</span><select data-k="qc_model">${opt(by('chat').filter(m => /vl|vision|gpt|gemini/i.test(m.id)), st.qc_model)}</select>
     <span>质检合格分</span><input data-k="qc_pass_score" type="number" min="0" max="100" step="5" value="${st.qc_pass_score}">
-    ${tog('auto_qc', '出片后自动质检')}
+    ${tog('auto_qc', '出片后自动质检')}${tog('auto_retake', '不合格自动按意见重抽')}
+    <span>每镜最多自动重抽</span><input data-k="retake_max" type="number" min="0" max="3" step="1" value="${st.retake_max}">
     ${tog('gen_asset_images', '一键时资产出图')}${tog('gen_blocking', '一键时生成站位图')}${tog('use_blocking_ref', '站位图作为出片参考')}
     ${tog('gen_frames', '一键时生成分镜图')}${tog('auto_assemble', '一键最后自动合成')}${tog('burn_subtitles', '字幕烧进画面')}
   </div><div class="row" style="margin-top:12px"><span class="muted small">“真实”模型会真实调用并扣费；“模拟”零成本，用来走通流程。超出项目预算的视频不会提交。</span>
@@ -466,12 +467,14 @@ function pgBoard() {
   return `<div class="card"><div class="bar"><h3 style="margin:0">分镜脚本</h3><span class="muted small">按集生成：AI 模式调用模型；本地模式用规则零成本快速验证。</span>
     <span class="spacer"></span>${e ? epSelect() : ''}<span class="badge">${esc(st.video_model)} · 单镜 ${d.min || 4}-${Math.min(15, d.max || 15)} 秒</span>
     <button onclick="genBoard(this,'local')">本地生成本集</button><button class="primary" onclick="genBoard(this,'auto')">AI 生成本集</button>
-    <button onclick="addShot(this)">新增卡片</button></div></div>
+    <button onclick="addShot(this)">新增卡片</button></div>
+    ${shots.some(s => s.density.length) ? `<div class="small warnc" style="margin-top:8px">⚠ ${shots.filter(s => s.density.length).length} 张卡塞得太满（视频模型一张卡只能可靠演出一两个动作），建议拆卡：${shots.filter(s => s.density.length).map(s => `<span class="chip click" onclick="shotModal('${s.id}')">${s.code}</span>`).join('')}</div>` : ''}</div>
   ${shots.length ? `<div class="grid">${shots.map(s => `<div class="shot"><div class="hd"><div><div class="code">${s.code}</div><div class="small muted">${s.duration_s} 秒</div></div>
       <div class="small muted" style="text-align:right">${esc([s.size, s.angle, s.movement].filter(Boolean).join('、'))}</div></div>
     <div class="bd"><div class="lab">画面</div><div class="txt">${esc(s.picture)}</div><div class="lab">表演</div><div class="txt">${esc(s.performance) || '—'}</div>
       <div class="lab">台词</div><div class="txt">${esc(s.dialogue) || '—'}</div>
-      <div style="margin-top:6px">${s.characters.map(c => `<span class="chip">@${esc(c)}</span>`).join('')}</div></div>
+      <div style="margin-top:6px">${s.characters.map(c => `<span class="chip">@${esc(c)}</span>`).join('')}</div>
+      ${s.density.length ? `<div class="small warnc" style="margin-top:6px">⚠ ${esc(s.density.join('；'))} <a href="javascript:void 0" onclick="splitShot('${s.id}',this)">拆卡</a></div>` : ''}</div>
     <div class="ft"><span>${esc(s.scene || s.scene_asset)}</span><span class="row">${badge(s.status)}<a href="javascript:void 0" onclick="shotModal('${s.id}')">点击预览</a></span></div></div>`).join('')}</div>`
     : `<div class="empty">${e ? '本集还没有分镜。点“AI 生成本集”或“本地生成本集”。' : '先在剧本页解析分集'}</div>`}`;
 }
@@ -501,6 +504,8 @@ function shotModal(sid) {
       ${s.original_text ? `<div class="small muted" style="margin-top:8px">原文</div><pre>${esc(s.original_text)}</pre>` : ''}</div></div>
     <div class="row" style="margin-top:12px"><button class="danger" onclick="delShot('${s.id}',this)">删除卡片</button>
       <button onclick="genFrame('${s.id}',this)">生成分镜图</button><button onclick="insertAfter(${s.episode_no},${s.shot_no},this)">在后面插一张</button>
+      <button onclick="splitShot('${s.id}',this)" title="按时间轴和台词一分为二">拆成两张</button>
+      ${s.density.length ? `<span class="small warnc">⚠ ${esc(s.density.join('；'))}</span>` : ''}
       <span class="spacer"></span><button onclick="closeModal(this)">取消</button><button class="primary" onclick="saveShot('${s.id}',${s.rev},this)">保存</button></div>`);
 }
 async function saveShot(sid, rev, btn) {
@@ -658,6 +663,7 @@ function pgVideos() {
     <a href="${BASE}/projects/${S.pid}/download?what=videos&episode_no=${e.no}"><button ${doneN ? '' : 'disabled'}>批量下载</button></a>
     <a href="${BASE}/projects/${S.pid}/edit-package?episode_no=${e.no}"><button ${doneN ? '' : 'disabled'} title="编号片段 + 字幕 + EDL/FCPXML，Premiere/达芬奇/剪映可用">导出剪辑工程</button></a>
     <button onclick="qcEpisode(this,${e.no})" ${doneN ? '' : 'disabled'} title="技术检查 + 视觉模型核对人物一致性/画面/字幕水印">质检本集</button>
+    <button onclick="retakeEpisode(this,${e.no})" title="把质检不合格、审片打回的镜头按意见改提示词后重抽">重抽不合格的</button>
     <button onclick="dubEpisode(this,${e.no})" title="按台词用角色音色合成配音轨">配音本集</button>
     <button onclick="act(this,()=>api('POST','/projects/${S.pid}/videos/poll'),'已刷新回执')">刷新回执</button></div>
     ${qcSummary(shots)}</div>`;
@@ -696,9 +702,9 @@ function pgVideos() {
       ${j && j.play_url ? `<video id="player" controls preload="metadata" poster="${esc(j.poster_url || '')}" src="${esc(j.play_url)}" style="margin-top:8px"></video>`
         : `<div class="thumb ${S.p.settings.aspect_ratio === '9:16' ? 'tall' : ''} ph small" style="margin-top:8px">${j && (j.status === 'submitted' || j.status === 'running') ? '生成中…' : '选择镜头或历史版本，在此查看成片'}</div>`}
       ${j && j.error ? `<div class="err small">${esc(j.error)}</div>` : ''}
-      ${j && j.status === 'succeeded' ? qcPanel(j) : ''}${dubPanel(s)}</div>
+      ${j && j.status === 'succeeded' ? reviewBar(j) + qcPanel(j) : ''}${j && j.retake ? retakeInfo(j, s) : ''}${dubPanel(s)}</div>
     <div class="card"><h3>历史版本</h3>${s.jobs.slice().reverse().map(x => `<div class="row small" style="padding:6px 0;border-bottom:1px solid var(--line)">
-      <b>v${x.version}</b>${badge(x.status)}${qcBadge(x.qc)}<span class="muted">${esc(JOB_MODE[x.mode] || x.mode)} · ${esc(x.model)} · ${esc(x.resolution)} · ${x.duration_s}s · ${rmb(x.charged_rmb || x.quoted_rmb)}</span><span class="spacer"></span>
+      <b>v${x.version}</b>${badge(x.status)}${qcBadge(x.qc)}${x.review === 'approved' ? '<span class="badge ok">已通过</span>' : x.review === 'rejected' ? `<span class="badge bad" title="${esc(x.review_note)}">打回</span>` : ''}${x.retake ? `<span class="badge acc" title="${esc((x.retake.changes || []).join('；'))}">重抽自 v${x.retake.from_version}</span>` : ''}<span class="muted">${esc(JOB_MODE[x.mode] || x.mode)} · ${esc(x.model)} · ${esc(x.resolution)} · ${x.duration_s}s · ${rmb(x.charged_rmb || x.quoted_rmb)}</span><span class="spacer"></span>
       ${x.status === 'succeeded' ? (x.id === s.selected_job_id ? '<span class="ok">当前</span>' : `<button class="small" onclick="act(this,()=>api('POST','/shots/${s.id}/select?job_id=${x.id}'),'已选用 v${x.version}')">选用</button>`)
         + `<button class="small" onclick="voiceModal('${x.id}')">截音色</button>${x.play_url ? `<a class="small" href="${esc(x.play_url)}" download>下载</a>` : ''}` : ''}
       ${x.status === 'submitted' || x.status === 'running' ? `<button class="small danger" onclick="act(this,()=>api('POST','/jobs/${x.id}/cancel'),'已取消')">取消</button>` : ''}</div>`).join('') || '<div class="muted small">生成完成后，历史版本会显示在这里。</div>'}</div>
@@ -810,7 +816,8 @@ function qcPanel(j) {
   if (!q) return `<div class="row small" style="margin-top:8px"><span class="muted">还没质检</span><span class="spacer"></span><button class="small" onclick="qcJob('${j.id}',this)">质检这个版本</button></div>`;
   return `<div class="card" style="margin:8px 0 0;padding:10px"><div class="row">${qcBadge(q)}
     ${q.character_consistency != null ? `<span class="small muted">人物一致 ${q.character_consistency} · 符合分镜 ${q.prompt_adherence}</span>` : ''}
-    <span class="spacer"></span><button class="small" onclick="qcJob('${j.id}',this)">重新质检</button></div>
+    <span class="spacer"></span><button class="small" onclick="qcJob('${j.id}',this)">重新质检</button>
+    ${q.issues.length ? `<button class="small" onclick="retakeShot('${j.shot_id}',this)" title="把下面的问题写进提示词再出一版">按意见重抽</button>` : ''}</div>
     <div class="small" style="margin-top:6px">${esc(q.summary)}</div>
     ${q.issues.length ? `<ul class="small" style="margin:6px 0 0 18px;padding:0">${q.issues.map(i => `<li><b>${esc(i.type)}</b>：${esc(i.detail)}</li>`).join('')}</ul>` : ''}
     <div class="small muted" style="margin-top:4px">${q.checks.map(c => `${c.ok ? '✓' : '✗'} ${esc(c.name)}（${esc(c.detail)}）`).join(' · ')}</div>
@@ -852,6 +859,44 @@ async function dubEpisode(btn, epNo) {
   await act(btn, () => api('POST', `/projects/${S.pid}/dub`, {episode_no: epNo}), r => `配音 ${r.dubbed} 镜，跳过 ${r.skipped} 镜（${rmb(r.charged_rmb)}）${r.errors && r.errors.length ? '，失败 ' + r.errors.length : ''}`);
 }
 
+function reviewBar(j) {
+  return `<div class="row small" style="margin-top:8px"><span class="muted">审片</span>
+    ${j.review === 'approved' ? '<span class="badge ok">已通过</span>' : j.review === 'rejected' ? `<span class="badge bad">打回</span><span class="muted">${esc(j.review_note)}</span>` : '<span class="muted">未审</span>'}
+    <span class="spacer"></span><button class="small" onclick="reviewJob('${j.id}','approved',this)">✓ 通过</button>
+    <button class="small danger" onclick="reviewJob('${j.id}','rejected',this)">✗ 打回</button>
+    ${j.review ? `<button class="small ghost" onclick="reviewJob('${j.id}','',this)">撤销</button>` : ''}</div>`;
+}
+function retakeInfo(j, s) {
+  const r = j.retake, old = s.jobs.find(x => x.id === r.from_job);
+  return `<div class="small muted" style="margin-top:6px">这一版是按意见重抽自 v${r.from_version}${r.from_score != null ? `（原 ${r.from_score} 分${j.qc ? ` → 现 ${j.qc.score} 分` : ''}）` : ''}${r.auto ? '，自动' : ''}：${esc((r.changes || []).join('；'))}
+    ${old && old.play_url ? ` <a href="${esc(old.play_url)}" target="_blank">看原版本</a>` : ''}</div>`;
+}
+function reviewStats(e) {
+  const shots = S.p.shots.filter(s => s.episode_id === e.id && s.job && s.job.status === 'succeeded');
+  if (!shots.length) return '';
+  const n = k => shots.filter(s => (s.job.review || '') === k).length;
+  return `<div class="small muted" style="margin-top:4px">审片：通过 ${n('approved')} · 打回 ${n('rejected')} · 未审 ${n('')}</div>`;
+}
+async function reviewJob(jid, status, btn) {
+  let note = '';
+  if (status === 'rejected') { note = prompt('打回原因（会写进重抽的提示词）：', ''); if (note === null) return; if (!note.trim()) return toast('打回要写一句原因', true); }
+  await act(btn, () => api('POST', `/jobs/${jid}/review`, {status, note}), status === 'approved' ? '已通过' : status === 'rejected' ? '已打回' : '已撤销');
+}
+async function retakeShot(sid, btn) {
+  if (!confirmCost([S.p.settings.video_model, S.p.settings.text_model], '按意见重抽')) return;
+  await act(btn, () => api('POST', `/projects/${S.pid}/retake`, {shot_ids: [sid]}), r => r.submitted.length ? `已重抽 v${r.submitted[0].version}：${(r.plans[0].changes || []).join('；').slice(0, 60)}` : (r.skipped[0] || {}).reason || '没有提交');
+}
+async function retakeEpisode(btn, epNo) {
+  if (!confirmCost([S.p.settings.video_model, S.p.settings.text_model], '重抽不合格镜头')) return;
+  await act(btn, () => api('POST', `/projects/${S.pid}/retake`, {episode_no: epNo}), r => `已重抽 ${r.submitted.length} 个：${r.submitted.map(x => x.code).join('、')}（约 ${rmb(r.quote.total_rmb)}）`);
+}
+async function splitShot(sid, btn) {
+  const s = S.p.shots.find(x => x.id === sid);
+  if (!confirm(`把镜头 ${s.code} 按时间轴一分为二？两张卡都要重新生成提示词和视频，原来的视频保留在历史里。`)) return;
+  const r = await act(btn, () => api('POST', `/shots/${sid}/split`), r => `已拆成 ${r.codes.join(' 和 ')}（${r.durations.join('s / ')}s）`);
+  if (r) { const m = btn && btn.closest('.modal'); if (m) m.remove(); }
+}
+
 // ---------------- 成片 ----------------
 function pgFinal() {
   const st = S.p.settings;
@@ -867,7 +912,7 @@ function pgFinal() {
       <span class="spacer"></span><button class="small" onclick="go('assets')">设置角色音色</button></div>
     <div class="small muted" style="margin-top:6px">配乐：${st.bgm_material_id ? '已选 ' + esc((S.p.materials.find(m => m.id === st.bgm_material_id) || {}).name || '') + `，音量 ${st.bgm_volume}` : '未设置（在“生成设置”里选一段上传的音频）'}</div></div>
   <div class="grid">${S.p.episodes.map(e => `<div class="card"><div class="row"><b>${esc(e.title)}</b>${e.final_url ? `<span class="badge ok">${e.final_seconds.toFixed(1)} 秒</span>` : '<span class="badge">未合成</span>'}
-    <span class="spacer"></span><span class="small muted">${e.videos_done}/${e.shots} 镜头已出片</span></div>
+    <span class="spacer"></span><span class="small muted">${e.videos_done}/${e.shots} 镜头已出片</span></div>${reviewStats(e)}
     ${e.cover_url ? `<img src="${esc(e.cover_url)}" class="thumb tall" style="margin-top:8px;max-width:180px">` : ''}
     ${e.final_url ? `<video controls src="${esc(e.final_url)}" style="margin-top:8px"></video><div class="row" style="margin-top:6px"><a href="${esc(e.final_url)}" download>下载视频</a><a href="${esc(e.srt_url)}" download>下载字幕</a></div>` : ''}
     <div class="row" style="margin-top:8px"><button class="small" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?episode_no=${e.no}'),'已合成')">合成本集</button>
@@ -925,7 +970,7 @@ function pgHelp() {
   const step = (t, sub, items, page) => `<div class="card"><h3>${t}</h3><div class="muted small">${sub}</div><ol>${items.map(x => `<li>${x}</li>`).join('')}</ol>
     ${page ? `<button onclick="go('${page}')">前往${(PAGES.find(p => p[0] === page) || [])[2]}</button>` : ''}</div>`;
   return `<div class="card"><div class="muted small">短剧工作台 v0.3 · 本机项目、资产版本、站位图、提示词、视频任务和成片，一次讲清</div>
-    <h2 style="margin:6px 0">从剧本到成片</h2><div class="flow">${['项目', '剧本', '资产', '分镜', '站位图', '提示词', '视频', '质检', '配音', '成片'].map(x => `<span>${x}</span>`).join('→')}</div>
+    <h2 style="margin:6px 0">从剧本到成片</h2><div class="flow">${['项目', '剧本', '资产', '分镜', '站位图', '提示词', '视频', '质检', '重抽/审片', '配音', '成片'].map(x => `<span>${x}</span>`).join('→')}</div>
     <div class="small muted" style="margin-top:8px">模型分“真实 / 模拟”：模拟零成本，用来练手和走流程；真实会扣费，受项目预算约束（超预算的视频不会提交）。</div></div>
   <div class="grid tut">
     ${step('创建项目', '剧本、资产、分镜、成片和历史版本都保存在本机。', ['在首页新建项目并选择风格（真人 / 3D / 2D）。', '项目可以设封面、置顶、下载（导出项目包）；别人用“上传项目”导入。', '右上角“生成设置”选模型、清晰度、画面比例和预算。'], 'home')}
@@ -936,6 +981,7 @@ function pgHelp() {
     ${step('转换并精修视频提示词', '格式：参考资产前缀 + 【镜头】时间轴 + 音效约束。', ['“生成最终提示词”走模型，“本地转换”零费用，“剧本直转提示词”跳过手动分镜。', '用 @名字 或 @名字（形态）引用资产；红色“未找到”要修正，黄色“已更新”表示资产换过图。'], 'prompts')}
     ${step('配置视频卡片并提交', '单镜可改参考模式、模型、分辨率、比例、时长和参考素材。', ['先“报价”看积分，再“生成当前镜头”；或勾选多个镜头“批量生成”。', '每次生成都是新版本，历史版本可选用、下载、截音色。', '失败自动退回预扣；刷新回执或等后台自动轮询。'], 'videos')}
     ${step('自动质检', '每个版本出片后自动打分，不合格的标红，方便集中重抽。', ['技术检查：时长、画幅、分辨率、有台词却没声音。', '视觉检查（真实出片时）：抽 4 帧对照角色定版图，看人物是否一致、是否符合分镜、有无字幕水印和崩坏；约 1 分钱/镜。', '视频页点“质检本集”统一复查；“选中不合格的”后直接批量重新生成。'], 'videos')}
+    ${step('重抽与审片', '把“不合格”变成可执行的修改，而不是人工反复试。', ['视频页每个版本可以“通过 / 打回”，打回要写一句原因。', '“按意见重抽”：把质检问题和打回原因写进提示词（如“必须清楚演出：抬头看红绿灯”“画面中只有 @孔宣”），再出一版；新版本记着来自哪一版、改了什么。', '新版本质检分更低时自动保留原版本。设置里可开“不合格自动重抽”（每镜最多 1~3 次，受预算约束）。', '分镜页会标出塞得太满的卡（5 秒里写了 3、4 个动作），一键“拆成两张”。'], 'videos')}
     ${step('配音 / 旁白', '给角色指定音色，按台词逐句合成配音轨。', ['资产页每个角色卡下选音色、点“试听”；不选会按角色自动分配。旁白音色在“生成设置”里。', '台词写成“角色：台词”，“旁白：…”或没写说话人的行用旁白音色；括号里的表演提示不会读出来。', '台词太长会自动加速（最多 1.35 倍），仍放不下会提示“超出镜头时长”。', '成片页选配音方式：保留原声 / 配音为主 + 原声垫底 / 只用配音；字幕按配音的真实时间对齐。'], 'final')}
     ${step('合成成片', '按集拼接选中的版本，自动出字幕。', ['“合成全部剧集”或单集合成；可选择把字幕烧进画面。', '下载 mp4 和 srt，导入剪辑软件继续精修。'], 'final')}
   </div>`;

@@ -17,6 +17,7 @@ from .errors import BudgetExceeded, Conflict, NotFound, WorkflowError  # noqa: F
 from .extras import ExtrasMixin
 from .util import new_id, short_hash
 from .qc_dub import QcDubMixin
+from .review import ReviewMixin
 from .video_ops import ACTIVE_JOB, VideoMixin
 
 log = logging.getLogger("workflow.pipeline")
@@ -50,6 +51,8 @@ DEFAULT_SETTINGS = {
     "dub_orig_volume": 0.35,         # mix 时原声音量
     "narrator_voice": "Neil",        # 旁白音色
     "tts_model": "qwen3-tts-flash",
+    "auto_retake": False,            # 自动质检不合格时按质检意见自动重抽（受预算约束）
+    "retake_max": 1,                 # 每个镜头最多自动重抽几次
 }
 SETTING_TYPES = {k: type(v) for k, v in DEFAULT_SETTINGS.items()}
 CHOICES = {"video_mode": ("auto", "text", "first_frame", "reference", "chain"), "engine": ("auto", "local"),
@@ -72,7 +75,7 @@ _id = new_id
 _h = short_hash
 
 
-class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ExtrasMixin):
+class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, ExtrasMixin):
     def __init__(self, agg: Agg, auto_topup_rmb: float = 0.0):
         self.agg = agg
         self.auto_topup_rmb = auto_topup_rmb
@@ -187,6 +190,7 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ExtrasMixin):
             if out[k] not in allowed:
                 raise WorkflowError(f"{k} 只能是 {'/'.join(allowed)}")
         out["max_shots"] = max(1, min(80, out["max_shots"]))
+        out["retake_max"] = max(0, min(3, out["retake_max"]))
         out["shot_seconds"] = max(2, min(30, out["shot_seconds"]))
         out["budget_rmb"] = max(0.0, out["budget_rmb"])
         out["bgm_volume"] = max(0.0, min(1.0, out["bgm_volume"]))
@@ -247,6 +251,7 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ExtrasMixin):
                 pr["stale"] = refs.stale(pr["bindings"], forms_by_id)
                 pr["suggestions"] = refs.suggest(pr["unresolved"], assets) if pr["unresolved"] else {}
             s["prompt"] = pr
+            s["density"] = llm.shot_density(s)
             dub = db.load(s.pop("dub_json", "") or "", {}) or {}
             s["dub"] = ({**dub, "url": media.url_of(s["dub_path"])}
                         if s.get("dub_path") and os.path.exists(s["dub_path"]) else None)

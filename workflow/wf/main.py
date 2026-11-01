@@ -567,6 +567,29 @@ async def clear_dub(pid: str, shot_id: str | None = None):
     return wf().clear_dub(pid, [shot_id] if shot_id else None)
 
 
+# ---------------- 重抽 / 审片 / 拆卡 ----------------
+
+@app.post("/projects/{pid}/retake")
+async def retake(pid: str, body: dict = Body(default={})):
+    return await wf().retake_shots(pid, body.get("shot_ids"), body.get("episode_no"),
+                                   tuple(body.get("verdicts") or ("fail",)), body.get("engine"))
+
+
+@app.post("/jobs/{jid}/review")
+def review_job(jid: str, body: dict = Body(...)):
+    return wf().review_job(jid, body.get("status", ""), body.get("note", ""))
+
+
+@app.get("/projects/{pid}/density")
+def density(pid: str, episode_no: int | None = None):
+    return wf().density(pid, episode_no)
+
+
+@app.post("/shots/{sid}/split")
+async def split_shot(sid: str):
+    return await wf().split_shot(sid)
+
+
 # ---------------- AI 对话 ----------------
 
 @app.get("/chat/agents")

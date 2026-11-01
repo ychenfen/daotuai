@@ -27,6 +27,7 @@ class VideoMixin:
         j["play_url"] = media.url_of(j["local_path"]) or ("" if media.is_mock_url(j["url"]) else j["url"])
         j["poster_url"] = media.url_of(j["poster_path"])
         j["qc"] = qc_view(j.pop("qc_json", "") or "")
+        j["retake"] = db.load(j.pop("retake_json", "") or "", None)
         return j
 
     async def model_info(self, model_id: str) -> dict:

@@ -305,9 +305,12 @@ class QcDubMixin:
 
         async def run():
             fails: dict[str, list[str]] = {}
+            results: dict[str, list[tuple[str, dict]]] = {}
             for p, jid in todo:
                 try:
                     q = await self.qc_job(jid)
+                    if q:
+                        results.setdefault(p, []).append((jid, q))
                     if q and q["verdict"] == "fail":
                         with db.tx() as c:
                             r = c.execute("SELECT s.shot_no, e.no FROM jobs j JOIN shots s ON s.id=j.shot_id "
@@ -317,6 +320,11 @@ class QcDubMixin:
                     log.warning("auto qc %s failed: %s", jid, e)
             for p, lines in fails.items():
                 self.notify(p, "warning", f"自动质检：{len(lines)} 个镜头不合格，建议重抽", "\n".join(lines[:10]))
+            for p, rs in results.items():   # 重抽版本择优 + 自动重抽
+                try:
+                    await self.after_auto_qc(p, rs)
+                except Exception as e:
+                    log.warning("after_auto_qc %s failed: %s", p, e)
 
         t = asyncio.get_running_loop().create_task(run())
         self._bg.add(t)

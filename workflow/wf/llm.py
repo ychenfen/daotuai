@@ -327,7 +327,9 @@ STORYBOARD_SYSTEM = """你是短剧分镜师。把一集剧本按场次拆成"�
 1. 时长在 %d~%d 秒之间，优先接近 %d 秒；segments 首尾相接覆盖整镜；
 2. 必须保留原剧本的人物、动作、台词，不得新增情节；
 3. 最多 %d 张卡；scene_code 用给定的场次编号；
-4. 有台词的卡，时长不得短于台词正常念完的时间（约每秒 4 个字，另留 1 秒）；一张卡装不下的台词拆到下一张卡。"""
+4. 有台词的卡，时长不得短于台词正常念完的时间（约每秒 4 个字，另留 1 秒）；一张卡装不下的台词拆到下一张卡；
+5. 每个时间段不短于 2 秒、只写一个看得见的主动作（写清起始姿态→动作→结束姿态）；5 秒的卡最多 2 段，
+   一张卡最多两人对话。动作多就拆成多张卡——视频模型在一张卡里只能可靠地演出一两个动作。"""
 
 
 SPEECH_CPS = 4.5   # 短剧台词正常语速：每秒约 4~5 个字
@@ -347,6 +349,39 @@ def speech_seconds(dialogue: str) -> float:
             total += n / SPEECH_CPS + 0.35
             lines += 1
     return round(total + 1.0, 1) if lines else 0.0
+
+
+_SEG_RE = re.compile(r"【(\d+(?:\.\d+)?)\s*[-~～—]\s*(\d+(?:\.\d+)?)\s*秒】")
+
+
+def segments(picture: str) -> list[tuple[float, float, str]]:
+    """画面时间轴 → [(起, 止, 这一段的文字)]。"""
+    ms = list(_SEG_RE.finditer(picture or ""))
+    out = []
+    for k, m in enumerate(ms):
+        end = ms[k + 1].start() if k + 1 < len(ms) else len(picture)
+        out.append((float(m.group(1)), float(m.group(2)), picture[m.end():end].strip()))
+    return out
+
+
+def shot_density(shot: dict) -> list[str]:
+    """一张卡是否塞得太满（实测：5 秒里写 3 个动作，模型只会演出 1 个）。返回问题列表，空 = 正常。"""
+    dur = float(shot.get("duration_s") or shot.get("duration") or 0) or 5.0
+    segs = segments(shot.get("picture") or "")
+    out = []
+    short = [f"{a:g}-{b:g}秒" for a, b, _ in segs if b - a < 1.5]
+    if short:
+        out.append(f"时间段太短（{'、'.join(short[:3])}），动作来不及演")
+    if len(segs) > max(2, int(dur / 2.0)):
+        out.append(f"动作过密：{dur:g} 秒里写了 {len(segs)} 段")
+    need = speech_seconds(shot.get("dialogue") or "")
+    if need > dur + 0.5:
+        out.append(f"台词约需 {need:g} 秒，镜头只有 {dur:g} 秒")
+    speakers = {re.sub(r"[（(].*$", "", m.group(1)) for m in re.finditer(r"^\s*([^：:\n]{1,12})[：:]", shot.get("dialogue") or "", re.M)}
+    speakers -= {"旁白", "画外音", "OS", "VO"}
+    if len(speakers) >= 3:
+        out.append(f"{len(speakers)} 人对话挤在一张卡里")
+    return out
 
 
 def fit_duration(duration: float, dialogue: str, lo: float, hi: float) -> float:
@@ -654,3 +689,74 @@ def mock_chat_reply(agent: str, question: str, context: str) -> str:
     head = AGENTS.get(agent, AGENTS["assistant"])["name"]
     ctx = f"（已读取项目上下文 {len(context)} 字）" if context else ""
     return f"[{head}·模拟回复]{ctx} 你问的是：{question[:200]}。当前为模拟模式，切换到真实文本模型后会给出完整回答。"
+
+
+# ======================================================================
+# 按质检意见改提示词（重抽用）
+# ======================================================================
+
+REVISE_SYSTEM = """你是 AI 视频提示词修改师。给你一条视频提示词，以及质检员/审片人看完成片后指出的问题。
+在不改变剧情、人物、台词的前提下修改提示词，让下一次生成避开这些问题：
+- 没演出来的关键动作：在对应时间段开头单独写一句，写清起始姿态→动作→结束姿态，必要时改近景别、放慢节奏；
+- 多余人物：明确写"画面中只有 @甲、@乙，没有其他人"；
+- 字幕水印：强调画面不出现任何文字、字幕、水印；
+- 角色不一致：强调外观与 @角色 参考一致（发型、服装、配色）；
+- 画面崩坏：降低动作幅度，减少同时运动的人数。
+保留原有结构和所有「@名字」「@名字（形态）」写法，不新增 @，不删除 @。只输出 JSON：
+{"positive":"改好的完整提示词","changes":["改了什么（一句话）"]}"""
+
+_MENTION_RE = re.compile(r"@[^\s@，,、；;：:。！？!?{}【】<>“”\"]+")
+_FIX_HEAD = "【质检修正】"
+
+
+def _fix_line(issue: dict, characters: list[str]) -> str:
+    t, d = str(issue.get("type") or ""), str(issue.get("detail") or "").strip()
+    if t == "多余人物":
+        who = "、".join("@" + c for c in characters) if characters else "分镜里写到的角色"
+        return f"画面中只有 {who}，不要出现其他人物"
+    if t == "字幕水印":
+        return "画面中不出现任何文字、字幕、水印、标志"
+    if t == "角色不一致":
+        return "角色外观（发型、服装、配色、体型）严格与参考一致，全程不变"
+    if t == "画面崩坏":
+        return "动作幅度适中、速度放慢，人物五官和肢体保持正常"
+    return f"必须清楚演出：{d}" if d else ""
+
+
+def mock_revise(prompt: str, issues: list[dict], characters: list[str]) -> tuple[str, list[str]]:
+    """本地规则：在提示词结尾的约束行前插入（或替换）一段【质检修正】。"""
+    lines = []
+    for i in issues:
+        ln = _fix_line(i, characters)
+        if ln and ln not in lines:
+            lines.append(ln)
+    base = re.sub(r"\n?" + re.escape(_FIX_HEAD) + r"[^\n]*", "", prompt or "").rstrip()
+    if not lines:
+        return base, []
+    block = _FIX_HEAD + "；".join(lines) + "。"
+    if SUFFIX in base:
+        head, _, tail = base.rpartition(SUFFIX)
+        return f"{head.rstrip()}\n{block}\n{SUFFIX}{tail}", lines
+    return f"{base}\n{block}", lines
+
+
+async def revise_prompt(agg: Agg, model: str, prompt: str, issues: list[dict], characters: list[str],
+                        engine: str | None = None) -> tuple[str, list[str], str]:
+    """返回 (新提示词, 改动说明, 来源 real/mock)。模型改坏了 @ 引用就退回本地规则。"""
+    if use_model(engine) and issues:
+        try:
+            user = (f"原提示词：\n{prompt}\n\n问题：\n" +
+                    "\n".join(f"- [{i.get('severity', '')}{i.get('type', '')}] {i.get('detail', '')}" for i in issues))
+            data = await _ask_json(agg, model, REVISE_SYSTEM, user, 2500)
+            new = str((data or {}).get("positive") or "").strip()
+            if new and set(_MENTION_RE.findall(new)) == set(_MENTION_RE.findall(prompt)) and len(new) > len(prompt) * 0.6:
+                if SUFFIX in prompt and SUFFIX not in new:
+                    new = new.rstrip() + "\n" + SUFFIX
+                return new, [str(x) for x in (data.get("changes") or [])][:6], "real"
+            log.warning("revise_prompt: 模型输出不合格（@ 引用变了或太短），改用本地规则")
+        except AggError as e:
+            if _strict(engine):
+                raise
+            log.warning("revise_prompt 失败，改用本地规则：%s", e)
+    new, changes = mock_revise(prompt, issues, characters)
+    return new, changes, "mock"
