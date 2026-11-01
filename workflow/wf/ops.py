@@ -129,6 +129,22 @@ class OpsMixin:
         bdir = os.path.join(os.path.dirname(db.DB_PATH), "backups") if hasattr(db, "DB_PATH") else ""
         backups = sorted(os.listdir(bdir)) if bdir and os.path.isdir(bdir) else []
         st = self.storage()
+        root = os.path.dirname(db.WF_ROOT)              # 安装根目录（服务器上是 /opt/daotuai）
+        rev = ""
+        try:
+            rev = open(os.path.join(root, "REVISION"), encoding="utf-8").read().strip()
+        except OSError:
+            pass
+        update = None
+        try:
+            import json as _json
+            update = _json.load(open(os.path.join(root, "data", "update", "status.json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        daily_dir = os.path.join(root, "data", "daily")
+        daily = sorted(os.listdir(daily_dir)) if os.path.isdir(daily_dir) else []
         return {"uptime_s": round(time.time() - self._started_at), "projects": projects, "running_jobs": running,
                 "running_tasks": tasks, "media_bytes": st["total_bytes"], "disk": st["disk"],
-                "last_backup": backups[-1] if backups else "", "backups": len(backups)}
+                "last_backup": backups[-1] if backups else "", "backups": len(backups),
+                "revision": rev[:7], "update": update, "daily_backups": len(daily),
+                "last_daily": daily[-1] if daily else ""}

@@ -190,7 +190,9 @@ async function loadStorage() {
     box.innerHTML = `<div class="row"><h3 style="margin:0">存储与运行状态</h3><span class="spacer"></span><button class="small" onclick="loadStorage()">刷新</button></div>
       <div class="row small" style="margin-top:6px"><span class="badge ${d.used_pct > 85 ? 'bad' : d.used_pct > 70 ? 'warn' : 'ok'}">磁盘已用 ${d.used_pct ?? '?'}% · 剩 ${d.free ? mb(d.free) : '?'}</span>
         <span class="badge">素材共 ${mb(s.total_bytes)}</span><span class="badge">在跑视频 ${o.running_jobs}</span><span class="badge">后台任务 ${o.running_tasks}</span>
-        <span class="badge">备份 ${o.backups} 份${o.last_backup ? ' · 最近 ' + esc(o.last_backup) : ''}</span><span class="badge">已运行 ${(o.uptime_s / 3600).toFixed(1)} 小时</span></div>
+        <span class="badge">备份 ${o.backups} 份${o.last_backup ? ' · 最近 ' + esc(o.last_backup) : ''}</span><span class="badge">已运行 ${(o.uptime_s / 3600).toFixed(1)} 小时</span>
+        ${o.revision ? `<span class="badge">版本 ${esc(o.revision)}</span>` : ''}${o.daily_backups ? `<span class="badge">每日备份 ${o.daily_backups} 天 · 最近 ${esc(o.last_daily)}</span>` : ''}
+        ${o.update ? `<span class="badge ${({updated: 'ok', up_to_date: 'ok', tests_failed: 'bad', rolled_back: 'bad'})[o.update.result] || 'warn'}" title="${esc(o.update.detail)}">自动更新：${esc(({updated: '刚更新', up_to_date: '已是最新', tests_failed: '新版测试没过，未更新', rolled_back: '新版启动失败，已回滚', no_access: '等待添加部署公钥', no_key: '未配置', fetch_failed: '拉取失败'})[o.update.result] || o.update.result)} · ${esc(o.update.at)}</span>` : ''}</div>
       <table class="small" style="margin-top:8px;width:100%"><tr class="muted"><td>项目</td><td>占用</td><td>明细</td><td></td></tr>
       ${s.projects.map(p => `<tr><td>${esc(p.name)}</td><td>${mb(p.bytes)}</td><td class="muted">${Object.entries(p.parts).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${esc(k)} ${mb(v)}`).join(' · ')}</td>
         <td>${p.orphan ? '' : `<button class="small" onclick="cleanupProj('${p.project}','${esc(p.name)}',this)">清理旧版本</button>`}</td></tr>`).join('')}</table>`;
@@ -300,7 +302,7 @@ async function libtvBox(check) {
     box.innerHTML = `<div class="row"><b>LibTV</b>${st.authorized ? '<span class="badge ok">已连接</span>' : '<span class="badge">未连接</span>'}
       <span class="muted small">官方远程 MCP，扣 LibTV 账户积分；视频模型里选 libtv- 开头的即用 LibTV 出片</span><span class="spacer"></span>
       ${st.authorized ? `<button class="small" onclick="libtvBox(true)">检查连接</button><button class="small danger" onclick="libtvLogout()">断开</button>`
-        : `<a href="${esc(st.login_url)}" target="_blank"><button class="small primary">连接 LibTV</button></a><button class="small" onclick="libtvBox(false)">我已授权，刷新</button>`}</div>
+        : `<a href="${esc(BASE + st.login_url)}" target="_blank"><button class="small primary">连接 LibTV</button></a><button class="small" onclick="libtvBox(false)">我已授权，刷新</button>`}</div>
       ${check ? (d.ok ? `<div class="small ok" style="margin-top:6px">连接正常 · 可用工具 ${d.tools.length} 个 · 准入 ${esc(JSON.stringify((d.doctor || {}).executionAdmission ?? '未返回'))}</div>`
         : `<div class="small err" style="margin-top:6px">${esc(d.error || '检查失败')}</div>`) : ''}
       ${!st.authorized ? '<div class="small muted" style="margin-top:6px">点“连接 LibTV”会打开 LibTV 登录授权页，授权完成后回到这里点“我已授权，刷新”。</div>' : ''}`;

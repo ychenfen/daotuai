@@ -6,11 +6,11 @@
 #       不打印、不进 git、不进日志。
 set -euo pipefail
 DOMAIN="${1:?用法: push_from_windows.sh <域名> [--with-data] [--force-data]}"; shift
-WITH_DATA=0; FORCE=0; SUBPATH_ARG=""
+WITH_DATA=0; FORCE=0; SUBPATH_ARG=""; SUBPATH=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --with-data) WITH_DATA=1; shift;; --force-data) FORCE=1; shift;;
-    --path) SUBPATH_ARG="--path ${2:?}"; shift 2;;   # 挂到已有站点的子路径，例 --path /studio
+    --path) SUBPATH_ARG="--path ${2:?}"; SUBPATH="/${2#/}"; SUBPATH="${SUBPATH%/}"; shift 2;;   # 挂到已有站点的子路径，例 --path /studio
     *) shift;;
   esac
 done
@@ -43,6 +43,8 @@ sx 'echo "  $(hostname) ok"; sudo mkdir -p /opt/daotuai && sudo chown ubuntu:ubu
 echo "== 推代码（$(git log --oneline -1)）"
 git -c core.autocrlf=false archive --format=tar -o "$STAGE/code.tar" HEAD
 sx 'tar xf - -C /opt/daotuai' "$STAGE/code.tar"
+git rev-parse HEAD > "$STAGE/rev"
+sx 'cat > /opt/daotuai/REVISION' "$STAGE/rev"
 
 echo "== 写密钥和默认设置（只显示名字）"
 keys=$(grep -oE 'api_key_env:\s*[A-Z0-9_]+' aggregator/providers.yaml | awk '{print $2}' | sort -u)
@@ -50,6 +52,7 @@ keys=$(grep -oE 'api_key_env:\s*[A-Z0-9_]+' aggregator/providers.yaml | awk '{pr
   for k in $keys; do v="${!k:-}"; [ -n "$v" ] && printf '%s=%s\n' "$k" "$v"; done
   [ -f .env ] && grep -E '^(WORKFLOW_(TEXT|IMAGE|VIDEO)_MODEL|WORKFLOW_RESOLUTION|WORKFLOW_BUDGET_RMB|WORKFLOW_LLM)=' .env || true
   echo "WORKFLOW_MEDIA=/opt/daotuai/media"
+  echo "LIBTV_REDIRECT_URI=https://$DOMAIN$SUBPATH/libtv/callback"   # LibTV 授权回跳到服务器地址（经工作台转发给聚合层）
 } > "$STAGE/env"
 sx 'umask 077; cat > /opt/daotuai/.env.new && mv /opt/daotuai/.env.new /opt/daotuai/.env && chmod 600 /opt/daotuai/.env' "$STAGE/env"
 if [ -n "${DAOTUAI_HTPASSWD:-}" ]; then   # 指定访问账号："用户名:$apr1$..."（只传哈希，不传明文）

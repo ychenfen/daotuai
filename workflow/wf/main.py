@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Body, FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db, llm, media
@@ -158,12 +158,28 @@ async def api_wallet():
 @app.get("/api/libtv")
 async def api_libtv(check: bool = False):
     """LibTV 连接状态；check=true 时再做一次只读的 doctor（身份、准入、工具列表）。"""
-    from .agg import AGG_BASE
     st = await wf().agg.libtv("status")
-    st["login_url"] = AGG_BASE.rstrip("/") + "/libtv/login"
+    st["login_url"] = "/libtv/login"   # 经工作台转发：挂在服务器子路径下时也能用（前端会加前缀）
+    st["redirect_uri"] = os.environ.get("LIBTV_REDIRECT_URI", "http://127.0.0.1:8010/libtv/callback")
     if check and st.get("authorized"):
         st["doctor"] = await wf().agg.libtv("doctor")
     return st
+
+
+@app.get("/libtv/login")
+async def libtv_login_proxy():
+    """转发到聚合层拿授权地址（聚合层只听 127.0.0.1，浏览器在服务器场景下直接访问不到）。"""
+    r = await wf().agg.c.get("/libtv/login", follow_redirects=False)
+    if r.status_code in (301, 302, 303, 307) and r.headers.get("location"):
+        return RedirectResponse(r.headers["location"])
+    return HTMLResponse(r.text, status_code=r.status_code)
+
+
+@app.get("/libtv/callback")
+async def libtv_callback_proxy(request: Request):
+    """LibTV 授权完成后回跳到这里（服务器上 LIBTV_REDIRECT_URI=https://域名/前缀/libtv/callback），转给聚合层换令牌。"""
+    r = await wf().agg.c.get("/libtv/callback", params=dict(request.query_params))
+    return HTMLResponse(r.text, status_code=r.status_code)
 
 
 @app.post("/api/libtv/logout")

@@ -1,0 +1,9 @@
+[Unit]
+Description=daotuai 自动更新（拉 GitHub → 测试 → 替换 → 健康检查/回滚）
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/bin/bash /opt/daotuai/deploy/linux/self_update.sh
+TimeoutStartSec=1800

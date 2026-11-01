@@ -47,10 +47,20 @@ else
   echo "== 4/6 不迁移数据"
 fi
 
-echo "== 5/6 后台服务"
-sudo cp deploy/linux/daotuai-aggregator.service deploy/linux/daotuai-workflow.service /etc/systemd/system/
+echo "== 5/6 后台服务 + 定时任务（自动更新、每日备份）"
+sudo cp deploy/linux/daotuai-aggregator.service deploy/linux/daotuai-workflow.service \
+        deploy/linux/daotuai-update.service deploy/linux/daotuai-update.timer \
+        deploy/linux/daotuai-backup.service deploy/linux/daotuai-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable -q daotuai-aggregator daotuai-workflow
+sudo systemctl enable -q --now daotuai-update.timer daotuai-backup.timer
+command -v git >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git >/dev/null
+if [ ! -f "$R/.deploy/id_ed25519" ]; then
+  mkdir -p "$R/.deploy" && chmod 700 "$R/.deploy"
+  ssh-keygen -q -t ed25519 -N "" -C "daotuai-server-deploy" -f "$R/.deploy/id_ed25519"
+fi
+echo "  自动更新用的部署公钥（在 GitHub 仓库 Settings → Deploy keys 添加，只读即可）："
+sed 's/^/    /' "$R/.deploy/id_ed25519.pub"
 sudo systemctl restart daotuai-aggregator daotuai-workflow
 for p in 8010 8011; do
   for i in $(seq 1 40); do curl -fs "http://127.0.0.1:$p/healthz" >/dev/null && break; sleep 0.5; done

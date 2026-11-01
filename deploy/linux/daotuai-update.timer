@@ -1,0 +1,10 @@
+[Unit]
+Description=daotuai 每 10 分钟检查一次更新
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

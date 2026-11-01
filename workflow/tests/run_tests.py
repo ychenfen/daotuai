@@ -962,6 +962,12 @@ async def main() -> int:
             pv2 = await j(await c.post(f"/projects/{pid}/cleanup", json={"dry_run": True, "keep_versions": 0}))
             check("再预览为 0（幂等）", pv2["files"] == 0, json.dumps(pv2)[:200])
 
+        print("\n[Z5] LibTV 登录经工作台转发")
+        lt = await j(await c.get("/api/libtv"))
+        check("登录地址走工作台（子路径部署也能用）", lt["login_url"] == "/libtv/login" and "redirect_uri" in lt, json.dumps(lt)[:200])
+        cb = await c.get("/libtv/callback?error=access_denied&error_description=user_cancel")
+        check("回跳转发给聚合层并返回页面", cb.status_code == 200 and "授权没有完成" in cb.text and "user_cancel" in cb.text, cb.text[:200])
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

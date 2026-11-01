@@ -1,0 +1,7 @@
+[Unit]
+Description=daotuai 每日数据库备份
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/bin/bash /opt/daotuai/deploy/linux/backup.sh
