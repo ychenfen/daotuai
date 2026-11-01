@@ -1059,6 +1059,22 @@ async def main() -> int:
         pj = wfllm._extract_json(bad_json)
         nl = wfllm._extract_json('{"scores":{"开场钩子":8},"issues":[{"detail":"第一行\n第二行","fix":"改"}],"summary":"好"}')
         tr = wfllm._extract_json('{"scores":{"开场钩子":8},"issues":[{"detail":"被截断')
+        raw_cut = ('{"scores":{"开场钩子":8,"集末钩子":3},"issues":[{"severity":"严重","item":"集末钩子","scene":"2-4","detail":"结尾没落到钩子","fix":"补一场"},'
+                   '{"severity":"中等","item":"可拍性","scene":"2-1","detail":"人太多","fix":"拆场"},{"severity":"轻微","detail":"被截')
+        m_dummy = sw.metrics("1-1 日 内 a ·约60秒\n人物：甲\n甲：好。\n", 60, [])
+        orig_ask = wfllm.ask
+
+        async def cut_ask(*a, **k):
+            return raw_cut
+        wfllm.ask = cut_ask
+        try:
+            os.environ["WORKFLOW_LLM"] = "auto"
+            rv_cut = await sw.review_episode(W.agg, "x", "第1集\n1-1 日 内 a\n甲：好。", {}, m_dummy, None)
+        finally:
+            os.environ["WORKFLOW_LLM"] = "mock"
+            wfllm.ask = orig_ask
+        check("审核输出被截断：分数和每条完整的问题都抢救出来", rv_cut["scores"].get("集末钩子") == 3.0 and len(rv_cut["issues"]) == 2
+              and rv_cut["grade"] == "C", json.dumps({k: rv_cut[k] for k in ("grade", "scores", "issues")}, ensure_ascii=False)[:300])
         check("JSON 容错：字符串里的原始换行、输出被截断", nl and nl["issues"][0]["detail"].startswith("第一行") and tr and tr["scores"]["开场钩子"] == 8,
               json.dumps([nl, tr], ensure_ascii=False))
         check("JSON 容错：字符串里的英文双引号、尾逗号能修好", pj and pj["issues"][0]["detail"].startswith("孔宣说") and pj["scores"]["开场钩子"] == 8,
@@ -1086,7 +1102,7 @@ async def main() -> int:
         m_other = sw.metrics("1-1 日 内 茶馆 ·约20秒\n人物：李小白\n△李小白低头看手机。\n", 20, props)
         check("道具误写不误报：人物自带的东西、这场没有该道具时都不算", not m_owned["misnamed_props"] and not m_other["misnamed_props"],
               json.dumps([m_owned["misnamed_props"], m_other["misnamed_props"]], ensure_ascii=False))
-        check("分级：道具写错是严重问题 → 至少 C", sw.grade(m["issues"]) in ("C", "D") and sw.grade([]) == "A"
+        check("分级：无问题 A；1 个严重 C；3 个严重 D", sw.grade([{"severity": "严重"}]) == "C" and sw.grade([]) == "A"
               and sw.grade([{"severity": "严重"}] * 3) == "D", sw.grade(m["issues"]))
         fixed = sw.mock_fix(bad_ep, {"props": props})
         check("本地修正：屏幕文字挪到【贴字】、道具改回全名、去掉心理描写",

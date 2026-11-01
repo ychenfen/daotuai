@@ -74,6 +74,7 @@ BIBLE_SYSTEM = """你是短剧总编剧。先不写正文，只做“故事圣�
 3. 每集只做“压”（主角受挫、积蓄情绪）或“放”（主角反击、释放爽感）之一，压放交替，前 3 集至少 1 次“放”。
 4. 集末钩子只能是三类之一，且不能连续 3 集同一类。
 5. 题材要可拍：每场出场人物不超过 3 个，避免大场面群戏、复杂特效连续动作；不要写弹幕刷屏、人群围观这类画面。
+issues 最多 6 条，按严重程度排序；detail 不超过 40 字，fix 不超过 30 字（太长会被截断）。
 JSON 字符串里不要出现英文双引号，引用台词用「」。"""
 
 EPISODE_SYSTEM = """你是短剧编剧。按“故事圣经 + 本集节拍”写第 %d 集剧本正文，只输出剧本，格式严格如下：
@@ -232,7 +233,9 @@ def metrics(ep_text: str, target_s: int, props: list[dict] | None = None, charac
                                 ("screen_text_unmarked", "中等", "屏幕/短信文字写在动作行里", "改成单独的【贴字】行"),
                                 ("busy_actions", "轻微", "一行动作写了多个动作", "一行只写一个主动作"),
                                 ("banned_words", "轻微", "出现心理描写", "改成看得见的表情和动作"),
-                                ("misnamed_props", "严重", "关键道具被写成了别的东西", "改回圣经里的道具全名"),
+                                # 代码只能看字面（同场出现替代物就算），会误报（实测：正常出现的手机）；
+                                # 降为“疑似”轻微提示，交给审核模型结合剧情判断
+                                ("misnamed_props", "轻微", "疑似把关键道具写成了别的东西（请结合剧情核实）", "确实是同一件道具就改回圣经里的全名"),
                                 ("risky", "轻微", "视频模型容易翻车的写法", "文字改【贴字】、人群改虚化背景、复杂动作拆开")):
         if out[name]:
             issues.append({"severity": sev, "item": "可拍性", "scene": "", "detail": f"{msg}：{'、'.join(out[name][:3])}",
@@ -349,9 +352,14 @@ async def review_episode(agg, model: str, text: str, beat: dict | None, m: dict,
                                 f"本集节拍：{json.dumps(beat or {}, ensure_ascii=False)}\n"
                                 f"代码指标：{json.dumps(facts, ensure_ascii=False)}\n剧本：\n{text[:8000]}", 3500)
             data = llm._extract_json(raw)
-            if not data:   # 整体解析不了时，至少把 6 项分数抢救出来
+            if not data:   # 整体解析不了时（多半是输出被截断），把分数和每条完整的问题抢救出来
                 sc = dict(re.findall(r'"(开场钩子|集末钩子|节拍兑现|情绪密度|人设一致|可拍性)"\s*:\s*(\d+(?:\.\d+)?)', raw or ""))
-                data = {"scores": sc, "issues": [], "summary": ""} if sc else None
+                rescued = []
+                for mm in re.finditer(r'\{[^{}]*?"severity"\s*:\s*"(严重|中等|轻微)"[^{}]*?\}', raw or ""):
+                    one = llm._extract_json(mm.group(0))
+                    if one and one.get("detail"):
+                        rescued.append(one)
+                data = {"scores": sc, "issues": rescued, "summary": ""} if sc or rescued else None
             if data and isinstance(data.get("issues"), list):
                 issues += [i for i in data["issues"] if isinstance(i, dict) and i.get("detail")][:12]
                 scores = {}
@@ -518,6 +526,7 @@ class ScriptMixin:
         rounds, history = 0, []
         rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"], b.get("characters")), engine)
         history.append(rv["grade"])
+        best = (text, rv)
         while auto_fix and rv["grade"] in ("C", "D") and rounds < 2:
             if rv["grade"] == "D" and rounds == 0:
                 text, src = await write_episode(self.agg, model, b, beat, seconds_per_ep, scenes, prev, engine)
@@ -526,6 +535,11 @@ class ScriptMixin:
             rounds += 1
             rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"], b.get("characters")), engine)
             history.append(rv["grade"])
+            if rv["grade"] < best[1]["grade"]:      # 字母越小越好
+                best = (text, rv)
+            elif rv["grade"] >= history[-2]:          # 改了一轮没变好就停，别白花钱（实测 C→C→C）
+                break
+        text, rv = best
         rv["history"] = history
         return beat["ep"], text, src, rv
 
