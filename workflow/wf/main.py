@@ -741,7 +741,8 @@ async def produce(pid: str, body: dict = Body(default={})):
     _seconds_until(body.get("start_at") or "")      # 先校验时间格式
     task = runner().start(pid, "produce", lambda prog: wf().produce(
         pid, body.get("episodes"), prog, float(body.get("per_episode_budget_rmb") or 0), bool(body.get("retake", True)),
-        body.get("export_preset") or "", body.get("start_at") or ""))
+        body.get("export_preset") or "", body.get("start_at") or ""),
+        params={k: body.get(k) for k in ("episodes", "per_episode_budget_rmb", "retake", "export_preset") if k in body})
     if body.get("wait"):
         while runner().busy(pid):
             await asyncio.sleep(0.2)
@@ -756,7 +757,8 @@ async def run_all(pid: str, resolution: str | None = None, wait: bool = False):
     p = wf().get(pid)
     if not p["script_text"].strip():
         raise WorkflowError("先写剧本")
-    task = runner().start(pid, "run_all", lambda prog: wf().run_all(pid, prog, resolution))
+    task = runner().start(pid, "run_all", lambda prog: wf().run_all(pid, prog, resolution),
+                          params={"resolution": resolution})
     if wait:
         while runner().busy(pid):
             await asyncio.sleep(0.2)
@@ -767,6 +769,20 @@ async def run_all(pid: str, resolution: str | None = None, wait: bool = False):
 @app.get("/projects/{pid}/tasks")
 def list_tasks(pid: str):
     return {"items": runner().list(pid)}
+
+
+@app.post("/tasks/{tid}/resume")
+async def resume_task(tid: str):
+    """服务重启中断的一键成片 / 批量生产：用原参数再跑一遍（各环节幂等：做完的跳过，在跑的视频不重复提交）。"""
+    t = runner().get(tid)
+    if not t["resumable"]:
+        raise WorkflowError("这个任务不需要续跑（只有被服务重启打断的一键成片/批量生产可以续跑）")
+    pid, prm = t["project_id"], t["params"]
+    if t["kind"] == "run_all":
+        return runner().start(pid, "run_all", lambda prog: wf().run_all(pid, prog, prm.get("resolution")), params=prm)
+    return runner().start(pid, "produce", lambda prog: wf().produce(
+        pid, prm.get("episodes"), prog, float(prm.get("per_episode_budget_rmb") or 0), bool(prm.get("retake", True)),
+        prm.get("export_preset") or "", ""), params=prm)
 
 
 @app.get("/tasks/{tid}")

@@ -265,6 +265,7 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
         vm = self.voice_map({"assets": assets})
         for a in assets:   # 配音实际会用的音色（没指定时是自动分配的）
             a["voice"] = vm[a["name"]]["voice"] if a["name"] in vm else ""
+        self._size_rhythm(shots)
         kinds = {"character": "characters", "scene": "scenes", "prop": "props", "creature": "creatures"}
         for e in eps:
             e["cover_url"] = media.url_of(e.get("cover_path") or "")
@@ -290,6 +291,8 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
     def _task_view(t: dict) -> dict:
         t["steps"] = db.load(t.pop("steps_json"), [])
         t["result"] = db.load(t.pop("result_json"), {})
+        t["params"] = db.load(t.pop("params_json", "{}") or "{}", {})
+        t["resumable"] = t["status"] == "failed" and "服务重启" in (t.get("error") or "") and t["kind"] in ("run_all", "produce")
         return t
 
     def _spend(self, pid: str) -> dict:
@@ -552,6 +555,23 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
             if m:
                 out.append(f"易翻车「{m.group(0)}」：{why}")
         return out
+
+    @staticmethod
+    def _size_rhythm(shots: list[dict]) -> None:
+        """景别节奏（借鉴 Toonflow shotCraft）：同一集连续 3 张卡主景别相同就提示（看第一段子镜头，没有就看卡的景别）。"""
+        def main(s):
+            seg = llm.segments_full(s.get("picture") or "")
+            if seg and seg[0][2]:
+                return seg[0][2]
+            return re.split(r"[、，,\s]+", s.get("size") or "")[0]
+        run, last_ep = [], None
+        for s in shots:
+            m = main(s)
+            if s["episode_id"] != last_ep:
+                run, last_ep = [], s["episode_id"]
+            run = run + [m] if run and m and run[-1] == m else ([m] if m else [])
+            if len(run) >= 3:
+                s["density"] = list(s.get("density") or []) + [f"连续 {len(run)} 张卡都是{m}开场，景别缺少变化"]
 
     @staticmethod
     def _prompt_warnings(positive: str, shot: dict, bible: dict, assets: list[dict] | None = None) -> list[str]:

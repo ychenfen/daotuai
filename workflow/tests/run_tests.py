@@ -1180,6 +1180,40 @@ async def main() -> int:
         check("类型节奏骨架齐全", all(g in sw.SKELETONS for g in sw.GENRES), "")
         await W.drain_background()
 
+        print("\n[S3] 借鉴第二批：防克隆/画外音/防拼图/负面词/连戏/景别节奏/质检盲区/任务续跑")
+        Wv = wf_main.wf()
+        stv = await j(await c.get(f"/projects/{sp}"))
+        shot2 = next(s for s in stv["shots"] if s["episode_no"] == 1)
+        sx = dict(shot2, characters=["孔宣", "沈岚"], dialogue="孔宣（OS）：黄气将散。\n沈岚：你说什么？")
+        ex = Wv._video_extras(stv, sx, "reference", ["img"])
+        check("发给视频模型前补约束：防拼图、同框人数防克隆、画外音嘴不动", "无分屏" in ex and "共 2 人" in ex and "嘴部不随声音" in ex, ex)
+        neg = Wv._video_negative("画面模糊", "wan3.0-video")
+        check("万相默认负面词并去重", "多余的手指" in neg and "背景人很多" in neg and neg.count("画面模糊") == 1 and "分屏" in neg, neg[:120])
+        check("非万相模型只加防拼图", "多余的手指" not in Wv._video_negative("", "seedance-2.5") and "宫格" in Wv._video_negative("", "seedance-2.5"), "")
+        from wf import db as wfdb5  # noqa: E402
+        fake = {"assets": [], "shots": [
+            {"episode_id": "e", "shot_no": 1, "scene_id": "sc", "job": {"qc": {"end_state": "孔宣站在电脑前右手扶桌，面朝屏幕"}}},
+            {"episode_id": "e", "shot_no": 2, "scene_id": "sc", "characters": ["孔宣"], "dialogue": "", "job": None}]}
+        ex2 = Wv._video_extras(fake, fake["shots"][1], "reference", [])
+        ex3 = Wv._video_extras(fake, dict(fake["shots"][1], scene_id="other"), "reference", [])
+        check("连戏快照：同场上一镜的结束状态写进下一镜，换场不写", "承接上一镜" in ex2 and "右手扶桌" in ex2 and "承接" not in ex3, ex2)
+        rows = [{"episode_id": "e", "picture": f"【0-3秒·近景】x{i}", "size": "", "density": []} for i in range(4)]
+        wf_main.wf()._size_rhythm(rows)
+        check("景别节奏：连续 3 张同景别开场就提示", not rows[1]["density"] and any("景别缺少变化" in d for d in rows[2]["density"]), json.dumps(rows[2]["density"], ensure_ascii=False))
+        with wfdb5.tx() as cc:
+            cc.execute("INSERT INTO tasks(id,project_id,kind,status,error,params_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                       ("task_resume_t", sp, "run_all", "failed", "服务重启，任务中断（可重新发起，已完成的环节会跳过）",
+                        json.dumps({"resolution": None}), "2026-11-01 00:00:00", "2026-11-01 00:00:00"))
+        t0 = await j(await c.get("/tasks/task_resume_t"))
+        check("被服务重启打断的任务可续跑", t0["resumable"], json.dumps(t0)[:200])
+        rs = await c.post("/tasks/task_resume_t/resume")
+        check("续跑：用原参数重新发起", rs.status_code == 200 and rs.json()["kind"] == "run_all", rs.text[:200])
+        while wf_main.runner().busy(sp):
+            await asyncio.sleep(0.2)
+        r = await c.post(f"/tasks/{rs.json()['id']}/resume")
+        check("正常结束的任务不能续跑 400", r.status_code == 400, r.text[:100])
+        await Wv.drain_background()
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

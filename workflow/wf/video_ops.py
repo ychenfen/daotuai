@@ -190,8 +190,10 @@ class VideoMixin:
             version = (max((j["version"] for j in s["jobs"]), default=0)) + 1
             crid = short_hash(s["id"], version, s["prompt"]["rev"], model, res, item["seconds"], used_mode)
             prompt = self.upstream_prompt(s["prompt"]["positive"], used_mode, record, s["prompt"]["bindings"])
-            if s["prompt"].get("negative"):
-                prompt += f"\n避免：{s['prompt']['negative']}"
+            prompt += self._video_extras(proj, s, used_mode, images)
+            neg = self._video_negative(s["prompt"].get("negative") or "", model)
+            if neg:
+                prompt += f"\n避免：{neg}"
             try:
                 r = await self._with_topup(lambda: self.agg.submit_video(
                     model, prompt, res, item["seconds"], aspect, images or None, idem=crid, project=proj["name"]))
@@ -216,6 +218,38 @@ class VideoMixin:
             self.notify(pid, "info", f"已提交 {len(submitted)} 个镜头出片",
                         f"{model} · {res} · 预计 ¥{quote['total_rmb']:.2f}")
         return {"project": pid, "submitted": submitted, "skipped": skipped, "quote": quote}
+
+    # 万相官方默认负面词（Wan2.2 shared_config，中文版）里和短剧相关的部分 + 防拼图（LocalMiniDrama）
+    WAN_NEGATIVE = ("画面静止，模糊，字幕，多余的手指，画得不好的手部，画得不好的脸部，畸形，毁容，形态畸形的肢体，"
+                    "手指融合，三条腿，背景人很多，倒着走，分屏，拼图，宫格，多画面拼接")
+
+    @classmethod
+    def _video_negative(cls, negative: str, model: str) -> str:
+        extra = cls.WAN_NEGATIVE if "wan" in (model or "").lower() else "分屏，拼图，宫格，多画面拼接"
+        have = set(re.split(r"[，,、\s]+", negative))
+        add = [w for w in extra.split("，") if w and w not in have]
+        return "，".join(x for x in [negative.strip("，, ")] + add if x)
+
+    def _video_extras(self, proj: dict, s: dict, mode: str, images: list) -> str:
+        """发给视频模型前补几句稳定性约束（借鉴 Toonflow / LocalMiniDrama / OnlyShot），以及连戏快照（LocalMiniDrama）。"""
+        lines = []
+        if images and mode in ("reference", "first_frame"):
+            lines.append("单镜头完整画幅，无分屏、无宫格、无多画面拼接（参考图里的三视图只用来认人）。")
+        names = [re.sub(r"[（(].*$", "", c) for c in s.get("characters") or []]
+        names = list(dict.fromkeys(n for n in names if n))
+        if len(names) >= 2:
+            looks = {a["name"]: (a.get("description") or "")[:24] for a in proj["assets"] if a["name"] in names}
+            who = "、".join(f"{n}（{looks[n]}）" if looks.get(n) else n for n in names)
+            lines.append(f"画面中共 {len(names)} 人：{who}，每人只出现一次，不要复制出长相相同的人。")
+        dlg = s.get("dialogue") or ""
+        if re.search(r"(?m)^\s*(旁白|画外音|OS|VO)\s*[：:]|[（(](OS|VO|画外音|内心|心声)[）)]", dlg):
+            lines.append("旁白/内心独白是画外音：说这些话时人物嘴部不随声音开合。")
+        prev = next((x for x in proj["shots"] if x["episode_id"] == s["episode_id"] and x["shot_no"] == s["shot_no"] - 1
+                     and x.get("scene_id") == s.get("scene_id")), None)
+        end_state = ((prev or {}).get("job") or {}).get("qc") or {}
+        if end_state.get("end_state") and mode != "first_frame":
+            lines.append(f"承接上一镜结束时的状态：{end_state['end_state'][:120]}")
+        return ("\n" + "\n".join(lines)) if lines else ""
 
     @staticmethod
     def upstream_prompt(prompt: str, mode: str, record: list[dict], bindings: list[dict]) -> str:

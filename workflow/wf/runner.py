@@ -64,13 +64,13 @@ class Runner:
         t = self._running.get(pid)
         return bool(t and not t.done())
 
-    def start(self, pid: str, kind: str, fn: Callable[[Progress], Awaitable[dict]]) -> dict:
+    def start(self, pid: str, kind: str, fn: Callable[[Progress], Awaitable[dict]], params: dict | None = None) -> dict:
         if self.busy(pid):
             raise Busy("这个项目已有任务在跑，等它结束或刷新查看进度")
         tid = "task_" + uuid.uuid4().hex[:12]
         with db.tx() as c:
-            c.execute("INSERT INTO tasks(id,project_id,kind,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                      (tid, pid, kind, "queued", db.now(), db.now()))
+            c.execute("INSERT INTO tasks(id,project_id,kind,status,created_at,updated_at,params_json) VALUES(?,?,?,?,?,?,?)",
+                      (tid, pid, kind, "queued", db.now(), db.now(), db.dump(params or {})))
         prog = Progress(tid)
 
         async def _run():
@@ -99,6 +99,8 @@ class Runner:
         t = dict(t)
         t["steps"] = db.load(t.pop("steps_json"), [])
         t["result"] = db.load(t.pop("result_json"), {})
+        t["params"] = db.load(t.pop("params_json", "{}") or "{}", {})
+        t["resumable"] = t["status"] == "failed" and "服务重启" in (t.get("error") or "") and t["kind"] in ("run_all", "produce")
         return t
 
     @staticmethod

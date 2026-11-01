@@ -62,6 +62,7 @@ QC_PROMPT = """你是严格的短剧视频质检员。前几张是本镜头应�
 {"character_consistency":0-100,"prompt_adherence":0-100,
  "issues":[{"type":"角色不一致|画面不符|字幕水印|画面崩坏|多余人物|其他","severity":"轻微|明显|严重","detail":"一句话"}],
  "prompt_conflict":"",
+ "end_state":"成片最后一帧：每个人的姿态朝向、服装、表情、手里拿的东西，光线（一句话，给下一镜连戏用）",
  "summary":"一句话结论"}
 character_consistency：只看角色长相、发型、服装是否与参考图一致。
 prompt_adherence：只看画面是否演出了分镜写的动作、情绪、景别和关键道具。分镜要求的关键动作没有出现，最多 50 分；
@@ -239,6 +240,10 @@ class QcDubMixin:
                 media.path_for(pid, "qc", f"{job_id}_f1.jpg")), 4, prefix=f"{job_id}_f")
         except Exception as e:
             checks.append({"name": "抽帧", "ok": False, "level": "warn", "detail": str(e)[:120]})
+        # 盲区：应出场但没有定版图可比对的角色（借鉴 MYStudio uncoveredCharacters），提醒人工重点看
+        have_img = {a["name"] for a in proj["assets"] if a.get("current_version") and a["kind"] in ("character", "creature")}
+        uncovered = [n for n in dict.fromkeys(re.sub(r"[（(].*$", "", c) for c in s.get("characters") or [])
+                     if n and n not in have_img]
         use_vision = (st.get("engine") != "local" and llm.mode() != "mock" and bool(frames)
                       and media.is_mock_url(j["url"]) is False) if vision is None else (vision and bool(frames))
         vis, charged, note, model = None, 0.0, "", st.get("qc_model") or "qwen3-vl-plus"
@@ -274,6 +279,8 @@ class QcDubMixin:
              "character_consistency": (vis or {}).get("character_consistency"),
              "prompt_adherence": (vis or {}).get("prompt_adherence"),
              "prompt_conflict": str((vis or {}).get("prompt_conflict") or "").strip()[:300],
+             "end_state": str((vis or {}).get("end_state") or "").strip()[:200],
+             "uncovered": uncovered,
              "note": note, "frames": frames, "charged_rmb": round(charged, 5), "at": db.now()}
         with db.tx() as c:
             c.execute("UPDATE jobs SET qc_json=? WHERE id=?", (db.dump(q), job_id))

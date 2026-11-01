@@ -131,7 +131,8 @@ function renderChrome() {
   $('#top').innerHTML = `<span class="title">${esc((PAGES.find(x => x[0] === S.page) || [])[2] || '')}</span>
     ${sp ? `<span class="pill" title="视频 ${rmb(sp.videos_rmb)} · 图片 ${rmb(sp.images_rmb)} · 文本 ${rmb(sp.text_rmb || 0)} · 配音 ${rmb(sp.audio_rmb || 0)}（超出预算的出片、出图、配音不会提交）">已花 <b>${rmb(sp.total_rmb)}</b> / ${rmb(sp.budget_rmb)}
       <span class="meter"><div class="${pct >= 100 ? 'over' : ''}" style="width:${pct}%"></div></span></span>` : ''}
-    ${t ? `<span class="pill" title="${esc(t.error || '')}">任务 ${badge(t.status)} ${(t.steps || []).filter(s => s.status === 'succeeded').length}/${(t.steps || []).length || '…'}</span>` : ''}
+    ${t ? `<span class="pill" title="${esc(t.error || '')}">任务 ${badge(t.status)} ${(t.steps || []).filter(s => s.status === 'succeeded').length}/${(t.steps || []).length || '…'}
+      ${t.resumable ? `<button class="small" onclick="act(this,()=>api('POST','/tasks/${t.id}/resume'),'已续跑：做完的环节会跳过')">续跑</button>` : ''}</span>` : ''}
     <span class="spacer"></span>
     <span class="rel"><button class="ghost" onclick="toggleNotif()">🔔 ${S.notif.unread ? `<span class="badge bad">${S.notif.unread}</span>` : ''}</button>
       ${S.notifOpen ? notifPanel() : ''}</span>
@@ -969,6 +970,8 @@ function qcPanel(j) {
     ${q.issues.length ? `<button class="small" onclick="retakeShot('${j.shot_id}',this)" title="把下面的问题写进提示词再出一版">按意见重抽</button>` : ''}</div>
     <div class="small" style="margin-top:6px">${esc(q.summary)}</div>
     ${q.prompt_conflict ? `<div class="small warnc" style="margin-top:4px">⚠ 提示词和分镜不一致：${esc(q.prompt_conflict)}（重抽会先按分镜改提示词）</div>` : ''}
+    ${(q.uncovered || []).length ? `<div class="small warnc" style="margin-top:4px">盲区：${esc(q.uncovered.join('、'))} 没有定版图，质检没法对照，请人工看一眼</div>` : ''}
+    ${q.end_state ? `<div class="small muted" style="margin-top:4px">结束状态（下一镜自动连戏）：${esc(q.end_state)}</div>` : ''}
     ${q.issues.length ? `<ul class="small" style="margin:6px 0 0 18px;padding:0">${q.issues.map(i => `<li><b>${esc(i.type)}</b>：${esc(i.detail)}</li>`).join('')}</ul>` : ''}
     <div class="small muted" style="margin-top:4px">${q.checks.map(c => `${c.ok ? '✓' : '✗'} ${esc(c.name)}（${esc(c.detail)}）`).join(' · ')}</div>
     ${q.note ? `<div class="small muted">${esc(q.note)}</div>` : ''}

@@ -312,7 +312,8 @@ MIGRATIONS = [
     ("projects", "bible_json", "TEXT NOT NULL DEFAULT ''"),          # 故事圣经：人设卡、道具表、分集节拍
     ("projects", "script_review_json", "TEXT NOT NULL DEFAULT ''"),  # 每集剧本体检结果
     ("shots", "overlay", "TEXT NOT NULL DEFAULT ''"),                # 后期贴字（屏幕/短信文字，不进视频提示词）
-    ("prompts", "warnings_json", "TEXT NOT NULL DEFAULT '[]'"),      # 提示词告警（道具写错等）      # 定版锁：锁定后不能换版本、不能再出图/上传/删除
+    ("prompts", "warnings_json", "TEXT NOT NULL DEFAULT '[]'"),      # 提示词告警（道具写错等）
+    ("tasks", "params_json", "TEXT NOT NULL DEFAULT '{}'"),          # 后台任务参数（服务重启后可一键续跑）      # 定版锁：锁定后不能换版本、不能再出图/上传/删除
 ]
 
 
