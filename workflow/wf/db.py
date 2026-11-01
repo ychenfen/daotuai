@@ -301,6 +301,7 @@ MIGRATIONS = [
     ("shots", "trim_in", "REAL NOT NULL DEFAULT 0"),              # 剪辑：片头剪掉几秒
     ("shots", "trim_out", "REAL NOT NULL DEFAULT 0"),             # 剪辑：片尾剪掉几秒
     ("shots", "xfade_s", "REAL NOT NULL DEFAULT 0"),              # 剪辑：和下一镜叠化几秒（0 = 硬切）
+    ("asset_forms", "locked", "INTEGER NOT NULL DEFAULT 0"),      # 定版锁：锁定后不能换版本、不能再出图/上传/删除
 ]
 
 

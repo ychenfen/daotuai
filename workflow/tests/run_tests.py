@@ -968,6 +968,28 @@ async def main() -> int:
         cb = await c.get("/libtv/callback?error=access_denied&error_description=user_cancel")
         check("回跳转发给聚合层并返回页面", cb.status_code == 200 and "授权没有完成" in cb.text and "user_cancel" in cb.text, cb.text[:200])
 
+        print("\n[Z6] 角色定版锁")
+        st = await j(await c.get(f"/projects/{pid}"))
+        ch = next(a for a in st["assets"] if a["kind"] == "character" and a["current_version"])
+        fid = ch["default_form_id"]
+        lk = await j(await c.post(f"/forms/{fid}/lock", json={"locked": True}))
+        check("定版锁住形态", next(f for f in lk["forms"] if f["id"] == fid)["locked"] == 1, "")
+        bad = [await c.post(f"/forms/{fid}/image"), await c.post(f"/forms/{fid}/select?version=1"),
+               await c.delete(f"/assets/{ch['id']}")]
+        check("锁定后不能重新出图 / 换版本 / 删除", all(r.status_code == 400 and "定版" in r.text for r in bad),
+              str([r.status_code for r in bad]))
+        before = len(next(f for f in lk["forms"] if f["id"] == fid)["versions"])
+        await c.post(f"/projects/{pid}/assets/images?only_missing=false")
+        st = await j(await c.get(f"/projects/{pid}"))
+        after = len(next(f for a in st["assets"] for f in a["forms"] if f["id"] == fid)["versions"])
+        check("批量重新出图跳过已定版的形态", before == after, f"{before}->{after}")
+        r = await j(await c.post(f"/projects/{pid}/lock", json={"locked": False}))
+        r2 = await j(await c.post(f"/projects/{pid}/lock", json={"locked": True}))
+        check("一键定版 / 解锁全部角色", r["changed"] >= 1 and r2["changed"] >= 1, json.dumps([r, r2]))
+        await c.post(f"/projects/{pid}/lock", json={"locked": False})
+        ok = await c.post(f"/forms/{fid}/select?version=1")
+        check("解锁后可以换版本", ok.status_code == 200, ok.text[:100])
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

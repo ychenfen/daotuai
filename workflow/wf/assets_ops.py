@@ -93,6 +93,36 @@ class AssetsMixin:
                 raise NotFound(f"资产不存在：{aid}")
             return next(a for a in self._assets(c, row["project_id"]) if a["id"] == aid)
 
+    @staticmethod
+    def _check_unlocked(a: dict, f: dict) -> None:
+        if f.get("locked"):
+            raise WorkflowError(f"「{a['name']}（{f['name']}）」已定版锁定 v{f['current_version']}，先解锁再改")
+
+    def lock_form(self, fid: str, locked: bool = True) -> dict:
+        a, f = self._form(fid)
+        if locked and not f["current_version"]:
+            raise WorkflowError("还没有版本，不能定版")
+        with db.tx() as c:
+            c.execute("UPDATE asset_forms SET locked=? WHERE id=?", (1 if locked else 0, fid))
+        return self.asset(a["id"])
+
+    def lock_project(self, pid: str, locked: bool = True, kinds: list[str] | None = None) -> dict:
+        """一键定版：把（默认）所有角色/生物已有版本的形态锁住，跨集保持同一张定版图。"""
+        kinds = kinds or ["character", "creature"]
+        with db.tx() as c:
+            assets = self._assets(c, pid)
+            n = 0
+            for a in assets:
+                if a["kind"] not in kinds:
+                    continue
+                for f in a["forms"]:
+                    if locked and not f["current_version"]:
+                        continue
+                    if bool(f.get("locked")) != locked:
+                        c.execute("UPDATE asset_forms SET locked=? WHERE id=?", (1 if locked else 0, f["id"]))
+                        n += 1
+        return {"project": pid, "locked": locked, "changed": n}
+
     def _form(self, fid: str) -> tuple[dict, dict]:
         with db.tx() as c:
             row = c.execute("SELECT asset_id FROM asset_forms WHERE id=?", (fid,)).fetchone()
@@ -170,6 +200,8 @@ class AssetsMixin:
 
     def delete_asset(self, aid: str) -> dict:
         a = self.asset(aid)
+        for f in a["forms"]:
+            self._check_unlocked(a, f)
         with db.tx() as c:
             c.execute("DELETE FROM assets WHERE id=?", (aid,))
         return {"deleted": aid, "name": a["name"]}
@@ -189,6 +221,7 @@ class AssetsMixin:
 
     def delete_form(self, fid: str) -> dict:
         a, f = self._form(fid)
+        self._check_unlocked(a, f)
         if f["is_default"]:
             raise WorkflowError("默认形态不能删")
         with db.tx() as c:
@@ -201,6 +234,7 @@ class AssetsMixin:
 
     async def _new_version(self, a: dict, f: dict, prompt: str, refs: list[str] | None, source: str,
                            size: str) -> dict:
+        self._check_unlocked(a, f)
         p = self._project_row(a["project_id"])
         st = self.settings(a["project_id"])
         version = (max((v["version"] for v in f["versions"]), default=0)) + 1
@@ -270,7 +304,7 @@ class AssetsMixin:
             assets = self._assets(c, pid)
         done, failed = [], []
         todo = [(a, f) for a in assets if a["kind"] != "audio" and not (kinds and a["kind"] not in kinds)
-                for f in a["forms"] if not (only_missing and f["current_version"])]
+                for f in a["forms"] if not (only_missing and f["current_version"]) and not f.get("locked")]
 
         async def one(a, f):
             na = await self.gen_form_image(f["id"])
@@ -303,6 +337,7 @@ class AssetsMixin:
 
     def upload_form_media(self, fid: str, data: bytes, filename: str = "upload.png") -> dict:
         a, f = self._form(fid)
+        self._check_unlocked(a, f)
         if not data:
             raise WorkflowError("上传的文件是空的")
         mt = _media_type(filename)
@@ -327,6 +362,7 @@ class AssetsMixin:
 
     def select_version(self, fid: str, version: int) -> dict:
         a, f = self._form(fid)
+        self._check_unlocked(a, f)
         if not any(v["version"] == version for v in f["versions"]):
             raise WorkflowError(f"没有这个版本：v{version}")
         with db.tx() as c:

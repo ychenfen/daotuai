@@ -601,6 +601,16 @@ def density(pid: str, episode_no: int | None = None):
     return wf().density(pid, episode_no)
 
 
+@app.post("/forms/{fid}/lock")
+def lock_form(fid: str, body: dict = Body(default={})):
+    return wf().lock_form(fid, bool(body.get("locked", True)))
+
+
+@app.post("/projects/{pid}/lock")
+def lock_project(pid: str, body: dict = Body(default={})):
+    return wf().lock_project(pid, bool(body.get("locked", True)), body.get("kinds"))
+
+
 @app.get("/api/storage")
 def storage():
     return wf().storage()

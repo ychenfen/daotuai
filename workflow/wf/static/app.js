@@ -381,6 +381,7 @@ function pgAssets() {
       <span class="spacer"></span><input style="width:160px" placeholder="搜索资产" value="${esc(S.assetQ)}" oninput="S.assetQ=this.value;clearTimeout(S.qt);S.qt=setTimeout(render,250)">
       <button class="primary" onclick="addAssetModal()">＋ 新增资产</button><button onclick="batchImages(this)">批量生图</button>
       <a href="${BASE}/projects/${S.pid}/download?what=assets"><button>批量下载</button></a><button onclick="bulkUpload(this)">批量上传</button>
+      <button onclick="lockAll(true,this)" title="把所有角色/生物当前版本锁住，跨集保持同一张定版图">🔒 一键定版角色</button>
       <button onclick="settingsModal()">生成设置</button></div></div>
   ${list.length ? `<div class="grid">${list.map(assetCard).join('')}</div>` : '<div class="empty">还没有资产。去剧本页点“AI 智能解析 / 本地抽取资产”，或手动新增。</div>'}`;
 }
@@ -391,11 +392,12 @@ function assetCard(a) {
       : `<div class="thumb ph">${KIND[a.kind].slice(0, 1)}</div>`);
   return `<div class="card" style="margin:0">${img}
     <div class="row" style="margin-top:8px"><b>${esc(a.name)}</b><span class="spacer"></span><span class="badge">${KIND[a.kind]}</span></div>
-    <div style="margin-top:4px">${a.forms.map(f => `<span class="chip click ${f.is_default ? 'on' : ''}" onclick="assetDetail('${a.id}','${f.id}')">${esc(f.name)} <span class="dot ${f.current_version ? 'ok' : ''}"></span></span>`).join('')}</div>
+    <div style="margin-top:4px">${a.forms.map(f => `<span class="chip click ${f.is_default ? 'on' : ''}" onclick="assetDetail('${a.id}','${f.id}')" title="${f.locked ? '已定版 v' + f.current_version + '（锁定）' : ''}">${f.locked ? '🔒' : ''}${esc(f.name)} <span class="dot ${f.current_version ? 'ok' : ''}"></span></span>`).join('')}</div>
     <div class="small muted" style="margin-top:4px">适用集数：${a.episodes.length ? a.episodes.map(n => '第' + n + '集').join('、') : '—'} · 引用 ${a.usage} 次${a.aliases.length ? ' · 别称：' + esc(a.aliases.join('、')) : ''}</div>
     ${['character', 'creature'].includes(a.kind) ? voiceRow(a) : ''}
     <div class="row" style="margin-top:8px"><button class="small" onclick="assetDetail('${a.id}')">编辑 / 历史版本</button>
-      ${a.kind !== 'audio' ? `<button class="small" onclick="genForm('${a.default_form_id}',this)">${a.current_version ? '重新出图' : '生成图片'}</button>` : ''}
+      ${a.kind !== 'audio' && !(a.forms.find(f => f.id === a.default_form_id) || {}).locked ? `<button class="small" onclick="genForm('${a.default_form_id}',this)">${a.current_version ? '重新出图' : '生成图片'}</button>` : ''}
+      ${['character', 'creature'].includes(a.kind) && a.current_version ? lockBtn(a) : ''}
       <button class="small" onclick="uploadForm('${a.default_form_id}','${a.kind}')">上传</button><span class="spacer"></span>
       <button class="small danger" onclick="delAsset('${a.id}','${esc(a.name)}')">删除</button></div></div>`;
 }
@@ -485,6 +487,14 @@ async function editImage(fid, aid, btn) {
   const r = await act(btn, () => api('POST', `/forms/${fid}/edit-image`, {instruction: $('#editIns').value}), '已生成修改版');
   if (r) reopen(aid, fid);
 }
+
+function lockBtn(a) {
+  const f = a.forms.find(x => x.id === a.default_form_id) || {};
+  return f.locked ? `<button class="small" onclick="lockForm('${f.id}',false,this)" title="解锁后可以换版本、重新出图">🔓 解锁</button>`
+    : `<button class="small" onclick="lockForm('${f.id}',true,this)" title="锁住当前版本 v${f.current_version}，之后的出片都用它">🔒 定版</button>`;
+}
+async function lockForm(fid, locked, btn) { await act(btn, () => api('POST', `/forms/${fid}/lock`, {locked}), locked ? '已定版' : '已解锁'); }
+async function lockAll(locked, btn) { await act(btn, () => api('POST', `/projects/${S.pid}/lock`, {locked}), r => `${locked ? '已定版' : '已解锁'} ${r.changed} 个形态`); }
 
 // ---------------- 分镜 ----------------
 function pgBoard() {
