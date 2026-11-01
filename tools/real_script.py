@@ -22,7 +22,8 @@ for x in b["props"]: print("  道具", x["name"], "｜别写成", x.get("avoid")
 for x in b["beats"]: print(f"  第{x['ep']}集 {x['mode']}{' ⭐卡点' if x['paywall'] else ''}｜开场 {x['hook_open']}｜反转 {x['twist']}｜爽点 {x['payoff']}｜集末 {x['hook_end']}（{x['hook_type']}）")
 for k in sorted(r["reviews"], key=int):
     v = r["reviews"][k]; m = v["metrics"]
-    print(f"== 第{k}集 评级 {v['grade']}（过程 {'→'.join(v.get('history', []))}）分项 {v.get('scores')}")
+    print(f"== 第{k}集 评级 {v['grade']}（过程 {'→'.join(v.get('history', []))}）审核来源 {v.get('source')} 分项 {v.get('scores')}")
+    print(f"   结论：{v.get('summary', '')[:120]}")
     print(f"   时长 标注{m['declared_seconds']}s/估算{m['estimated_seconds']}s/目标{m['target_seconds']}s 贴字{m['tiezi']} 长句{len(m['long_lines'])} 人数超{len(m['crowded_scenes'])} 屏幕字未贴{len(m['screen_text_unmarked'])} 道具写错{m['misnamed_props']}")
     for i in v["issues"][:5]: print("   -", i["severity"], i.get("scene", ""), i["detail"][:80])
 print("== 第 1 集正文 ==")

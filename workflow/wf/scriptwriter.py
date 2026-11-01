@@ -154,12 +154,18 @@ def _lines(text: str):
     return [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
 
 
-def metrics(ep_text: str, target_s: int, props: list[dict] | None = None) -> dict:
+def _avoid_map(props: list[dict] | None, characters: list[dict] | None = None) -> dict[str, str]:
+    """“容易被误写成的东西” → 道具全名。人物外貌里本来就有的东西（如李小白的碎屏手机）不算误写（实测误报）。"""
+    owned = " ".join(c.get("look", "") for c in characters or [])
+    return {w: p["name"] for p in (props or []) for w in (p.get("avoid") or []) if w and w not in owned}
+
+
+def metrics(ep_text: str, target_s: int, props: list[dict] | None = None, characters: list[dict] | None = None) -> dict:
     scenes = llm.split_scenes(1, ep_text)
     declared, issues = 0.0, []
     est_total = 0.0
     long_lines, crowded, screen_unmarked, banned, busy = [], [], [], [], []
-    avoid = {w: p["name"] for p in (props or []) for w in (p.get("avoid") or []) if w}
+    avoid = _avoid_map(props, characters)
     misnamed = []
     for k, sc in enumerate(scenes, start=1):
         m = re.search(r"约\s*(\d+)\s*秒", sc.get("heading") or "")
@@ -169,6 +175,8 @@ def metrics(ep_text: str, target_s: int, props: list[dict] | None = None) -> dic
         if n_people > 3:
             crowded.append(f"第{k}场 {n_people} 人")
         est = 0.0
+        # 只在“这场戏本来就有这个道具”时才查误写：同一场里既出现道具全名、又出现替代物，才说明叫法不一致
+        scene_avoid = {w: n for w, n in avoid.items() if n in sc["text"]}
         for ln in _lines(sc["text"]):
             if ln.startswith("人物"):
                 continue
@@ -182,7 +190,7 @@ def metrics(ep_text: str, target_s: int, props: list[dict] | None = None) -> dic
                     screen_unmarked.append(body[:30])
                 if len(re.findall(r"[，,；;]", body)) >= 3 or len(body) > 45:
                     busy.append(body[:24])
-                for w, name in avoid.items():
+                for w, name in scene_avoid.items():
                     if w in body and name not in body:
                         misnamed.append(f"“{w}”（应为{name}）")
             sp = llm.SPEAKER_RE.match(ln)
@@ -193,7 +201,7 @@ def metrics(ep_text: str, target_s: int, props: list[dict] | None = None) -> dic
                 for piece in re.split(r"[。！？!?…]+", words):
                     if len(re.sub(r"[\W_]", "", piece)) > LINE_MAX:
                         long_lines.append(piece[:20])
-                for w, name in avoid.items():
+                for w, name in scene_avoid.items():
                     if w in words and name not in words:
                         misnamed.append(f"“{w}”（应为{name}）")
             if any(b in ln for b in BANNED):
@@ -333,8 +341,15 @@ async def review_episode(agg, model: str, text: str, beat: dict | None, m: dict,
                                        f"代码指标：{json.dumps(facts, ensure_ascii=False)}\n剧本：\n{text[:8000]}", 2500)
             if data and isinstance(data.get("issues"), list):
                 issues += [i for i in data["issues"] if isinstance(i, dict) and i.get("detail")][:12]
-                scores = {k: v for k, v in (data.get("scores") or {}).items() if isinstance(v, (int, float))}
+                scores = {}
+                for k, v in (data.get("scores") or {}).items():
+                    try:
+                        scores[k] = float(str(v).split("/")[0])
+                    except ValueError:
+                        pass
                 summary, source = str(data.get("summary") or ""), "real"
+            else:
+                log.warning("剧本审核输出解析不了，只用代码指标：%s", str(data)[:200])
         except AggError as e:
             if llm._strict(engine):
                 raise
@@ -377,7 +392,7 @@ async def revise_episode(agg, model: str, text: str, review: dict, bible: dict |
 def mock_fix(text: str, bible: dict | None) -> str:
     """本地规则能修的：屏幕文字挪到【贴字】、道具名改回全名、删心理描写词、长句切开。"""
     out = []
-    avoid = {w: p["name"] for p in ((bible or {}).get("props") or []) for w in (p.get("avoid") or [])}
+    avoid = _avoid_map((bible or {}).get("props"), (bible or {}).get("characters"))
     for ln in text.splitlines():
         s = ln
         for w, name in avoid.items():
@@ -488,7 +503,7 @@ class ScriptMixin:
         prev = b["beats"][beat["ep"] - 2]["hook_end"] if beat["ep"] > 1 else ""
         text, src = await write_episode(self.agg, model, b, beat, seconds_per_ep, scenes, prev, engine)
         rounds, history = 0, []
-        rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"]), engine)
+        rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"], b.get("characters")), engine)
         history.append(rv["grade"])
         while auto_fix and rv["grade"] in ("C", "D") and rounds < 2:
             if rv["grade"] == "D" and rounds == 0:
@@ -496,7 +511,7 @@ class ScriptMixin:
             else:
                 text, _ = await revise_episode(self.agg, model, text, rv, b, beat, engine)
             rounds += 1
-            rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"]), engine)
+            rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"], b.get("characters")), engine)
             history.append(rv["grade"])
         rv["history"] = history
         return beat["ep"], text, src, rv
@@ -555,7 +570,7 @@ class ScriptMixin:
             raise NotFound(f"第 {episode_no} 集不存在")
         outs = await self.gather_limited(
             review_episode(self.agg, st["text_model"], f"{title}\n{body}", beats.get(n),
-                           metrics(body, target, b.get("props")), st["engine"]) for n, title, body in todo)
+                           metrics(body, target, b.get("props"), b.get("characters")), st["engine"]) for n, title, body in todo)
         p = self._project_row(pid)
         reviews = db.load(p["script_review_json"] or "", {}) or {}
         for (n, _, _), rv in zip(todo, outs):

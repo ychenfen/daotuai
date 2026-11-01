@@ -579,13 +579,15 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
         或分镜提到了它而提示词漏掉；屏幕文字写进了画面。"""
         out = []
         src = " ".join(str(shot.get(k) or "") for k in ("picture", "dialogue", "original_text", "performance"))
+        owned = " ".join(c.get("look", "") for c in bible.get("characters") or [])
         for p in bible.get("props") or []:
             name = p.get("name") or ""
             if not name:
                 continue
             in_src = name in src
             for w in p.get("avoid") or []:
-                if w and w in positive and name not in positive:
+                # 只查“这个镜头本来就有这个道具”的情况；人物自带的东西（外貌里写了）不算误写
+                if w and in_src and w in positive and name not in positive and w not in owned:
                     out.append(f"道具写错：分镜/圣经里是「{name}」，提示词写成了「{w}」")
             if in_src and name not in positive and not any(w in positive for w in p.get("avoid") or []):
                 out.append(f"提示词漏了关键道具「{name}」")

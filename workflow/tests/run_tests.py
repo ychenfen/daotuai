@@ -1063,7 +1063,7 @@ async def main() -> int:
         check("节拍表：钩子不连续 3 集同类、压放只认两种、卡点由代码定",
               all(not (hts[i] == hts[i - 1] == hts[i - 2]) for i in range(2, 6)) and all(b["mode"] in ("压", "放") for b in nb["beats"])
               and [b["ep"] for b in nb["beats"] if b["paywall"]] == sw.paywall_episodes(6), str(hts))
-        bad_ep = ("1-1 日 内 营业部 ·约20秒\n人物：孔宣、沈岚、股民甲、股民乙\n"
+        bad_ep = ("1-1 日 内 营业部 ·约20秒\n人物：孔宣、沈岚、股民甲、股民乙\n△孔宣走到营业部台式电脑前。\n"
                   "△孔宣盯着手机，屏幕上显示“买入成功”，他心想这下稳了，又站起来，又坐下，又拍桌\n"
                   "孔宣：这一局我看得清清楚楚量化也算不过我你们都等着瞧吧\n")
         props = [{"name": "营业部台式电脑", "look": "黑色", "avoid": ["手机", "平板"]}]
@@ -1071,6 +1071,10 @@ async def main() -> int:
         check("代码指标：人数超标 / 屏幕文字没写贴字 / 长句 / 心理描写 / 动作太多 / 道具写错",
               m["crowded_scenes"] and m["screen_text_unmarked"] and m["long_lines"] and m["banned_words"]
               and m["busy_actions"] and m["misnamed_props"], json.dumps({k: m[k] for k in m if k != "issues"}, ensure_ascii=False)[:300])
+        m_owned = sw.metrics(bad_ep, 20, props, [{"name": "李小白", "look": "总拿着一部屏幕碎了的手机"}])
+        m_other = sw.metrics("1-1 日 内 茶馆 ·约20秒\n人物：李小白\n△李小白低头看手机。\n", 20, props)
+        check("道具误写不误报：人物自带的东西、这场没有该道具时都不算", not m_owned["misnamed_props"] and not m_other["misnamed_props"],
+              json.dumps([m_owned["misnamed_props"], m_other["misnamed_props"]], ensure_ascii=False))
         check("分级：道具写错是严重问题 → 至少 C", sw.grade(m["issues"]) in ("C", "D") and sw.grade([]) == "A"
               and sw.grade([{"severity": "严重"}] * 3) == "D", sw.grade(m["issues"]))
         fixed = sw.mock_fix(bad_ep, {"props": props})
@@ -1093,7 +1097,7 @@ async def main() -> int:
         b2 = dict(bb["bible"]); b2["props"] = props
         await j(await c.put(f"/projects/{sp}/bible", json={"bible": b2}))
         cur = (await j(await c.get(f"/projects/{sp}")))["script_text"]
-        await j(await c.post(f"/projects/{sp}/script", json={"text": cur.replace("△", "△孔宣盯着手机，屏幕上写着“买入成功”。△", 1)}))
+        await j(await c.post(f"/projects/{sp}/script", json={"text": cur.replace("△", "△孔宣站在营业部台式电脑旁。\n△孔宣盯着手机，屏幕上写着“买入成功”。\n△", 1)}))
         r1 = await j(await c.post(f"/projects/{sp}/script/review", json={"episode_no": 1, "seconds_per_ep": 60}))
         g1 = r1["reviews"]["1"]
         check("体检现有剧本：指出道具写错、屏幕文字没写贴字", any("道具" in i["detail"] for i in g1["issues"])
