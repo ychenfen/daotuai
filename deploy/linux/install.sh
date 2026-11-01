@@ -21,6 +21,7 @@ need=()
 dpkg -s python3-venv >/dev/null 2>&1 || need+=(python3-venv)
 command -v ffmpeg >/dev/null || need+=(ffmpeg)
 command -v openssl >/dev/null || need+=(openssl)
+ldconfig -p 2>/dev/null | grep -q libmediainfo || need+=(libmediainfo0v5)   # 剪映草稿导出读素材信息用
 if [ ${#need[@]} -gt 0 ]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${need[@]}" >/dev/null

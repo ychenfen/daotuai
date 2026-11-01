@@ -1215,11 +1215,8 @@ async def main() -> int:
         await Wv.drain_background()
 
         print("\n[S4] 剪映草稿导出")
-        try:
-            import pyJianYingDraft  # noqa: F401
-            has_jy = True
-        except ImportError:
-            has_jy = False
+        from wf import jianying as _jy  # noqa: E402
+        has_jy = _jy.available()
         if HAS_FFMPEG and has_jy:
             import zipfile as _zf2
             rz = await c.get(f"/projects/{pid}/jianying-draft?episode_no=1&target=D:/剪映素材")

@@ -20,15 +20,23 @@ from .errors import WorkflowError
 DEFAULT_TARGET = "D:/剪映素材"
 
 
+def available() -> bool:
+    try:
+        import pymediainfo
+        import pyJianYingDraft  # noqa: F401
+        return bool(pymediainfo.MediaInfo.can_parse())
+    except Exception:
+        return False
+
+
 def _safe(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|\s]+', "_", name).strip("_")[:40] or "draft"
 
 
 def build_draft(proj: dict, ep: dict, shots: list[dict], target_root: str, srt_path: str = "") -> tuple[str, str]:
-    try:
-        import pyJianYingDraft as jy
-    except ImportError:
-        raise WorkflowError("服务器还没装 pyJianYingDraft（pip install pyJianYingDraft），装好后再导出剪映草稿")
+    if not available():
+        raise WorkflowError("服务器缺少剪映草稿组件（pip install pyJianYingDraft；Linux 还要 apt install libmediainfo0v5）")
+    import pyJianYingDraft as jy
     st = proj["settings"]
     w, h = media.preset_size(st["aspect_ratio"], 1920)
     name = _safe(f"{proj['name']}_第{ep['no']}集")
