@@ -257,6 +257,13 @@ CREATE TABLE IF NOT EXISTS notifications (
   read INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS script_versions (           -- 剧本改动前的快照（可撤销）
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_eps_project ON episodes(project_id, no);
 CREATE INDEX IF NOT EXISTS idx_scenes_ep ON scenes(episode_id, no);
 CREATE INDEX IF NOT EXISTS idx_assets_project ON assets(project_id, kind);
@@ -301,7 +308,11 @@ MIGRATIONS = [
     ("shots", "trim_in", "REAL NOT NULL DEFAULT 0"),              # 剪辑：片头剪掉几秒
     ("shots", "trim_out", "REAL NOT NULL DEFAULT 0"),             # 剪辑：片尾剪掉几秒
     ("shots", "xfade_s", "REAL NOT NULL DEFAULT 0"),              # 剪辑：和下一镜叠化几秒（0 = 硬切）
-    ("asset_forms", "locked", "INTEGER NOT NULL DEFAULT 0"),      # 定版锁：锁定后不能换版本、不能再出图/上传/删除
+    ("asset_forms", "locked", "INTEGER NOT NULL DEFAULT 0"),
+    ("projects", "bible_json", "TEXT NOT NULL DEFAULT ''"),          # 故事圣经：人设卡、道具表、分集节拍
+    ("projects", "script_review_json", "TEXT NOT NULL DEFAULT ''"),  # 每集剧本体检结果
+    ("shots", "overlay", "TEXT NOT NULL DEFAULT ''"),                # 后期贴字（屏幕/短信文字，不进视频提示词）
+    ("prompts", "warnings_json", "TEXT NOT NULL DEFAULT '[]'"),      # 提示词告警（道具写错等）      # 定版锁：锁定后不能换版本、不能再出图/上传/删除
 ]
 
 

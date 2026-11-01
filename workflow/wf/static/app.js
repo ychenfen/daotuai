@@ -253,12 +253,77 @@ async function delProject(pid, name) {
   await act(null, () => api('DELETE', '/projects/' + pid), '已删除');
   if (S.pid === pid) { S.pid = null; go('home', null); }
 }
+const GENRES = ['都市逆袭', '穿越', '重生复仇', '甜宠', '战神', '悬疑', '古风权谋', '玄幻修仙', '家庭伦理', '喜剧'];
+const GRADE = {A: 'ok', B: 'acc', C: 'warn', D: 'bad'};
+function bibleCard() {
+  const b = S.p.bible || {}, rv = S.p.script_review || {};
+  const grades = Object.keys(rv).sort((x, y) => x - y);
+  if (!b.beats && !grades.length) return '';
+  return `<div class="card"><div class="bar"><h3 style="margin:0">故事圣经 · 分集节拍</h3>
+    ${b.logline ? `<span class="muted small">${esc(b.title || '')}｜${esc(b.logline)}</span>` : ''}<span class="spacer"></span>
+    ${b.beats ? `<button class="small" onclick="bibleJson()">编辑（JSON）</button>` : ''}</div>
+    ${b.characters && b.characters.length ? `<div class="small" style="margin-top:8px"><b>人设</b> ${b.characters.map(c => `<span class="chip" title="${esc(`欲望：${c.desire || ''}；软肋：${c.weakness || ''}；口头禅：${c.catchphrase || ''}；外貌：${c.look || ''}`)}">${esc(c.name)} · ${esc(c.tags || '')}</span>`).join('')}</div>` : ''}
+    ${b.props && b.props.length ? `<div class="small" style="margin-top:4px"><b>关键道具</b> ${b.props.map(p => `<span class="chip" title="${esc(p.look || '')}">${esc(p.name)}${(p.avoid || []).length ? `<span class="muted">（别写成 ${esc(p.avoid.join('/'))}）</span>` : ''}</span>`).join('')}</div>` : ''}
+    ${b.beats ? `<table class="small" style="width:100%;margin-top:8px"><tr class="muted"><td>集</td><td>压/放</td><td>开场钩子</td><td>反转</td><td>爽点</td><td>集末钩子</td><td>体检</td></tr>
+      ${b.beats.map(x => { const r = rv[x.ep]; return `<tr><td>${x.ep}${x.paywall ? ' <span title="付费卡点集">⭐</span>' : ''}</td><td>${esc(x.mode)}</td><td>${esc(x.hook_open)}</td><td>${esc(x.twist)}</td><td>${esc(x.payoff)}</td>
+        <td>${esc(x.hook_end)} <span class="muted">（${esc(x.hook_type)}）</span></td><td>${r ? `<span class="badge ${GRADE[r.grade]}" style="cursor:pointer" onclick="reviewDetail(${x.ep})">${r.grade}</span>` : '-'}</td></tr>`; }).join('')}</table>`
+      : `<div class="row small" style="margin-top:8px">${grades.map(k => `<span class="badge ${GRADE[rv[k].grade]}" style="cursor:pointer" onclick="reviewDetail(${k})">第${k}集 ${rv[k].grade}</span>`).join('')}</div>`}</div>`;
+}
+function reviewDetail(n) {
+  const r = (S.p.script_review || {})[n]; if (!r) return;
+  const m = r.metrics || {};
+  modal(`<div class="row"><h3 style="margin:0">第${n}集剧本体检</h3><span class="badge ${GRADE[r.grade]}">${r.grade}</span><span class="spacer"></span><button onclick="closeModal(this)">✕</button></div>
+    <div class="small" style="margin-top:6px">${esc(r.summary)}</div>
+    ${Object.keys(r.scores || {}).length ? `<div class="row small" style="margin-top:6px">${Object.entries(r.scores).map(([k, v]) => `<span class="badge ${v >= 8 ? 'ok' : v >= 6 ? 'warn' : 'bad'}">${esc(k)} ${v}</span>`).join('')}</div>` : ''}
+    <div class="small muted" style="margin-top:6px">时长：标注 ${m.declared_seconds}s / 估算 ${m.estimated_seconds}s / 目标 ${m.target_seconds}s · ${m.scenes} 场 · 贴字 ${m.tiezi} 行</div>
+    <ul class="small" style="margin:8px 0 0 18px;padding:0">${(r.issues || []).map(i => `<li><span class="badge ${i.severity === '严重' ? 'bad' : i.severity === '中等' ? 'warn' : ''}">${esc(i.severity)}</span> ${i.scene ? esc(i.scene) + ' ' : ''}${esc(i.detail)}${i.fix ? `<div class="muted">→ ${esc(i.fix)}</div>` : ''}</li>`).join('') || '<li>没有问题</li>'}</ul>
+    <div class="row" style="margin-top:12px;justify-content:flex-end"><button onclick="closeModal(this)">关闭</button>
+      ${(r.issues || []).length ? `<button class="primary" onclick="reviseEp(${n},this)">按建议改写本集</button>` : ''}</div>`);
+}
+async function reviewScript(btn) {
+  if (!confirmCost([S.p.settings.text_model], '剧本体检')) return;
+  const text = $('#script').value;
+  await act(btn, async () => { await api('POST', `/projects/${S.pid}/script`, {text}); return api('POST', `/projects/${S.pid}/script/review`, {}); },
+    r => `体检完成：${Object.entries(r.grades).map(([k, v]) => `第${k}集 ${v}`).join('，')}`);
+}
+async function reviseEp(n, btn) {
+  if (!confirmCost([S.p.settings.text_model], '改写剧本')) return;
+  const r = await act(btn, () => api('POST', `/projects/${S.pid}/script/revise`, {episode_no: n}), r => r.changed ? `第${n}集已改写：${r.before} → ${r.after}（原稿已存版本，可撤销）` : '没有需要改的');
+  if (r) { const m = btn.closest('.modal'); if (m) m.remove(); }
+}
+async function scriptVersions() {
+  const v = await api('GET', `/projects/${S.pid}/script/versions`);
+  modal(`<div class="row"><h3 style="margin:0">剧本历史版本</h3><span class="spacer"></span><button onclick="closeModal(this)">✕</button></div>
+    <div class="small muted">每次一键剧本、按建议改写之前都会自动存一份；恢复前也会先把当前稿存起来。</div>
+    <table class="small" style="width:100%;margin-top:8px">${v.items.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.note)}</td><td>${x.chars} 字</td>
+      <td><button class="small" onclick="restoreScript(${x.id},this)">恢复</button></td></tr>`).join('') || '<tr><td>还没有历史版本</td></tr>'}</table>`, true);
+}
+async function restoreScript(id, btn) {
+  if (!confirm('用这个版本替换当前剧本？（当前稿会先存一份）')) return;
+  const r = await act(btn, () => api('POST', `/projects/${S.pid}/script/versions/${id}/restore`), '已恢复');
+  if (r) { const m = btn.closest('.modal'); if (m) m.remove(); render(); }
+}
+async function bibleJson() {
+  const r = await api('GET', `/projects/${S.pid}/bible`);
+  modal(`<div class="row"><h3 style="margin:0">编辑故事圣经</h3><span class="spacer"></span><button onclick="closeModal(this)">✕</button></div>
+    <div class="small muted">人设卡（characters）、道具表（props：name 全名、look 外观、avoid 容易被误写成的东西）、分集节拍（beats）。付费卡点集由系统按总集数自动标注。</div>
+    <textarea id="bjTxt" rows="22" style="margin-top:8px;font-family:monospace;font-size:12px">${esc(JSON.stringify(r.bible, null, 1))}</textarea>
+    <div class="row" style="margin-top:10px;justify-content:flex-end"><button onclick="closeModal(this)">取消</button><button class="primary" onclick="saveBible(this)">保存</button></div>`);
+}
+async function saveBible(btn) {
+  let b; try { b = JSON.parse($('#bjTxt').value); } catch (e) { return toast('JSON 格式不对：' + e.message, true); }
+  const r = await act(btn, () => api('PUT', `/projects/${S.pid}/bible`, {bible: b}), '故事圣经已保存');
+  if (r) { const m = btn.closest('.modal'); if (m) m.remove(); }
+}
 function scriptGenModal() {
   if (!S.pid) { toast('先新建或选择一个项目，剧本会写进这个项目', true); return; }
-  modal(`<h3>一键剧本</h3><div class="muted small">从小说、故事或一句灵感创作分集剧本，写入当前项目「${esc(S.p ? S.p.name : '')}」。</div>
+  modal(`<h3>一键剧本</h3><div class="muted small">从小说、故事或一句灵感创作分集剧本，写入当前项目「${esc(S.p ? S.p.name : '')}」。<br>
+    流程：故事圣经（人设卡、道具表）→ 分集节拍（压/放、钩子、反转、爽点、付费卡点）→ 逐集写 → 体检打分 → 定向修正。原剧本会自动存版本，可撤销。</div>
     <textarea id="sgIdea" rows="8" style="margin-top:10px" placeholder="贴一段小说，或写一句灵感：外卖员捡到一只会说话的猫……"></textarea>
     <div class="kv" style="margin-top:10px"><span>集数</span><input id="sgN" type="number" min="1" max="30" value="3">
-      <span>每集时长（秒）</span><input id="sgSec" type="number" min="30" max="600" value="90">
+      <span>每集时长（秒）</span><input id="sgSec" type="number" min="20" max="300" value="60">
+      <span>类型</span><select id="sgGenre"><option value="">按素材判断</option>${GENRES.map(g => `<option>${g}</option>`).join('')}</select>
+      <span>写完自动体检修正</span><select id="sgFix"><option value="1">开（C 档定向改写≤2 轮，D 档重写）</option><option value="0">关</option></select>
       <span>写入方式</span><select id="sgMode"><option value="replace">替换当前剧本</option><option value="append">追加到末尾</option></select></div>
     <div class="row" style="margin-top:12px;justify-content:flex-end"><button onclick="closeModal(this)">取消</button>
       <button class="primary" onclick="genScript(this)">生成剧本</button></div>`, true);
@@ -266,7 +331,8 @@ function scriptGenModal() {
 async function genScript(btn) {
   if (!confirmCost([S.p.settings.text_model], '一键剧本')) return;
   const r = await act(btn, () => api('POST', `/projects/${S.pid}/script/generate`, {idea: $('#sgIdea').value,
-    episodes: +$('#sgN').value, seconds_per_ep: +$('#sgSec').value, mode: $('#sgMode').value}), '剧本已生成');
+    episodes: +$('#sgN').value, seconds_per_ep: +$('#sgSec').value, mode: $('#sgMode').value, genre: $('#sgGenre').value,
+    auto_fix: $('#sgFix').value === '1'}), r => `剧本已生成：评级 ${Object.keys(r.reviews || {}).sort((a, b) => a - b).map(k => r.reviews[k].grade).join('')}`);
   if (r) { closeModal(btn); go('script'); }
 }
 
@@ -347,11 +413,13 @@ function pgScript() {
     <button onclick="uploadScript(this)">⇧ 上传剧本</button><button onclick="saveScript(this)">保存剧本</button>
     <button onclick="parseScript(this)">全剧解析</button>
     <button onclick="extract(this,'local')">本地抽取资产</button><button class="primary" onclick="extract(this,'ai')">AI 智能解析</button>
-    <button onclick="scriptGenModal()">一键剧本</button><button onclick="settingsModal()">生成设置</button></div>
-    <textarea id="script" rows="20" style="margin-top:10px" placeholder="粘贴剧本，或上传 TXT / DOCX / PDF。格式：第1集 / 1-1 日 外 地点 / 人物：甲、乙 / △动作 / 甲（情绪）：台词" oninput="S.dirty=true">${esc(p.script_text)}</textarea>
+    <button onclick="scriptGenModal()">一键剧本</button><button onclick="reviewScript(this)" title="代码指标 + 模型按 6 项审核，A/B/C/D 分级">剧本体检</button>
+    <button onclick="scriptVersions()">历史版本</button><button onclick="settingsModal()">生成设置</button></div>
+    <textarea id="script" rows="20" style="margin-top:10px" placeholder="粘贴剧本，或上传 TXT / DOCX / PDF。格式：第1集 / 1-1 日 外 地点 ·约20秒 / 人物：甲、乙 / △动作（一行一个） / 甲（情绪）：台词 / 【贴字】屏幕上的字（后期贴）" oninput="S.dirty=true">${esc(p.script_text)}</textarea>
     <div class="row" style="margin-top:8px"><span class="badge">${p.script_text.length} 字</span>
       ${chk ? `${chk.warnings.map(w => `<span class="badge warn">${esc(w)}</span>`).join('')}<span class="badge acc">${chk.episodes} 集 · ${chk.scenes} 场</span>` : ''}
       <span class="spacer"></span><label class="small muted"><input type="checkbox" id="forceParse"> 重新解析时清空旧分镜、提示词和视频任务</label></div></div>
+  ${bibleCard()}
   <div class="grid">${p.episodes.map(e => `<div class="card"><div class="row"><b>${esc(e.title)}</b><span class="spacer"></span>
     ${e.final_url ? '<span class="badge ok">已成片</span>' : ''}</div>
     <div class="muted small" style="margin:6px 0">${esc(e.raw_text.slice(0, 70))}…</div>
@@ -549,7 +617,7 @@ function shotModal(sid) {
   modal(`<div class="row"><h3 style="margin:0">镜头 ${s.code}</h3>${badge(s.status)}<span class="spacer"></span><button onclick="closeModal(this)">✕</button></div>
     <div class="split2" style="margin-top:10px"><div class="kv">
       ${f('picture', '画面（时间段）', 6)}${f('performance', '表演', 3)}${f('dialogue', '台词', 3)}${f('blocking', '站位', 2)}${f('sfx', '音效')}
-      ${f('size', '景别')}${f('angle', '角度')}${f('movement', '运镜')}${f('transition', '转场')}
+      ${f('overlay', '后期贴字', 2)}${f('size', '景别')}${f('angle', '角度')}${f('movement', '运镜')}${f('transition', '转场')}
       <span>时长（秒）</span><input data-f="duration_s" type="number" min="1" max="30" value="${s.duration_s}">
       <span>出场角色</span><input data-f="characters" value="${esc(s.characters.join('，'))}" placeholder="逗号分隔；形态写成 孔宣（蛋）">
       <span>场景资产</span><input data-f="scene_asset" value="${esc(s.scene_asset)}"></div>
@@ -634,7 +702,8 @@ function pgPrompts() {
         <div style="margin-top:6px">${p.bindings.map(b => `<span class="chip">${esc(b.mention)} v${b.version}</span>`).join('')}
         ${p.unresolved.map(u => `<span class="chip bad" title="资产表里没有">@${esc(u)} 未找到</span>` + ((p.suggestions || {})[u] || []).map(g =>
           `<span class="chip click warn" title="点一下替换" onclick="fixMention('${s.id}','${esc(u)}','${esc(g)}')">是不是 ${esc(g)}？</span>`).join('')).join('')}
-        ${p.stale.map(b => `<span class="chip warn" title="资产换过图，出片时自动用最新版本">${esc(b.name)} 已更新</span>`).join('')}</div>`
+        ${p.stale.map(b => `<span class="chip warn" title="资产换过图，出片时自动用最新版本">${esc(b.name)} 已更新</span>`).join('')}
+        ${(p.warnings || []).map(w => `<span class="chip bad">⚠ ${esc(w)}</span>`).join('')}</div>`
         : '<div class="muted">还没有提示词</div>'}
         <div class="small muted" style="margin-top:6px">负向：${p ? esc(p.negative.slice(0, 40)) : '—'}</div>
         <div class="small muted">${esc(st.aspect_ratio)} · ${esc(S.p.style)} · ${s.duration_s} 秒</div></div>
@@ -1108,6 +1177,7 @@ function pgHelp() {
   <div class="grid tut">
     ${step('创建项目', '剧本、资产、分镜、成片和历史版本都保存在本机。', ['在首页新建项目并选择风格（真人 / 3D / 2D）。', '项目可以设封面、置顶、下载（导出项目包）；别人用“上传项目”导入。', '右上角“生成设置”选模型、清晰度、画面比例和预算。'], 'home')}
     ${step('上传并解析剧本', '系统识别剧集、场次、角色、场景、道具和生物。', ['粘贴正文或上传 TXT / DOCX / PDF；没有剧本可以用“一键剧本”。', '“第1集”分集，“1-1 日 外 金鸡岭”分场，“人物：甲、乙”列角色，“孔宣（蛋形态）”会自动建形态。', '“AI 智能解析”走模型；“本地抽取”零费用。重新解析前看清是否勾选“清空旧分镜”。'], 'script')}
+    ${step('剧本增强（故事圣经 · 节拍 · 体检）', '先定人设和节拍，再逐集写，写完自动体检，问题定向修。', ['“一键剧本”：选类型和每集时长 → 故事圣经（人设卡、关键道具表）→ 分集节拍（压/放交替、开场钩子、反转、爽点、集末钩子三类不连用、付费卡点⭐按总集数自动定位）→ 逐集写。', '格式：场次标题写“·约N秒”；屏幕/短信上的字写成【贴字】行（后期作为字幕出现，不让视频模型画字）；每场 ≤3 人、一行动作只写一个主动作。', '“剧本体检”：代码先算时长、语速、长句、人数、屏幕文字、道具写错，再由模型按 6 项审核，A/B/C/D 分级；点评级看问题，“按建议改写本集”只改被点名的地方。', '每次改写前自动存版本，“历史版本”里可以一键恢复。道具表里的“别写成”会一路检查到提示词。'], 'script')}
     ${step('制作资产与管理历史版本', '每个角色形态、场景、道具都可以保留多个版本。', ['核对名称、描述、别称和形态，可点“AI 润色”补全描述。', '生成图片（角色为面部特写 + 三视图）、改图、上传本地图；历史版本里点一下就切换。', '批量上传按文件名匹配：孔宣.png、孔宣-蛋.png。', '音频资产「角色名音色」会自动写进提示词的声线参考；也可在视频页从成片截取。'], 'assets')}
     ${step('按集生成分镜', '每张卡就是一次视频生成，卡内按时间段写画面。', ['选集后点“AI 生成本集”；时长受视频模型限制（如 4-15 秒）。', '逐卡检查画面、表演、台词、站位和时长；可新增、插入、删除卡片。'], 'board')}
     ${step('站位图', '每个场次一张，人物到场后的位置关系，同场景分镜共用。', ['先确保场景和角色有图（右侧会提示“需核对素材”）。', '一键生成本集，或逐场生成；可写站位说明。', '出片选“全能参考”时自动带上站位图。'], 'blocking')}

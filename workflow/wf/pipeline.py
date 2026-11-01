@@ -20,6 +20,7 @@ from .qc_dub import QcDubMixin
 from .ops import OpsMixin
 from .produce import ProduceMixin
 from .review import ReviewMixin
+from .scriptwriter import ScriptMixin
 from .video_ops import ACTIVE_JOB, VideoMixin
 
 log = logging.getLogger("workflow.pipeline")
@@ -63,7 +64,7 @@ CHOICES = {"video_mode": ("auto", "text", "first_frame", "reference", "chain"), 
 
 EDITABLE = {
     "shot": {"duration_s", "scene", "size", "angle", "movement", "picture", "performance", "blocking",
-             "dialogue", "sfx", "transition", "characters", "scene_asset"},
+             "dialogue", "sfx", "transition", "characters", "scene_asset", "overlay"},
     "prompt": {"positive", "negative"},
     "asset": {"name", "aliases", "description", "notes"},
     "form": {"name", "description"},
@@ -77,7 +78,7 @@ _id = new_id
 _h = short_hash
 
 
-class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, ProduceMixin, ExtrasMixin):
+class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, ProduceMixin, ScriptMixin, ExtrasMixin):
     def __init__(self, agg: Agg, auto_topup_rmb: float = 0.0):
         self.agg = agg
         self.auto_topup_rmb = auto_topup_rmb
@@ -250,6 +251,7 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
             if pr:
                 pr["bindings"] = db.load(pr.pop("bindings_json"), [])
                 pr["unresolved"] = db.load(pr.pop("unresolved_json"), [])
+                pr["warnings"] = db.load(pr.pop("warnings_json", "[]") or "[]", [])
                 pr["stale"] = refs.stale(pr["bindings"], forms_by_id)
                 pr["suggestions"] = refs.suggest(pr["unresolved"], assets) if pr["unresolved"] else {}
             s["prompt"] = pr
@@ -278,6 +280,8 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
             for a in assets:
                 if a["kind"] in kinds and e["no"] in a["episodes"]:
                     e["stats"][kinds[a["kind"]]] += 1
+        p["bible"] = db.load(p.pop("bible_json", "") or "", {}) or {}
+        p["script_review"] = db.load(p.pop("script_review_json", "") or "", {}) or {}
         return {**p, "cover_url": media.url_of(p.pop("cover_path")), "settings": settings, "episodes": eps,
                 "scenes": scenes, "assets": assets, "shots": shots, "materials": materials,
                 "spend": self._spend(pid), "task": self._task_view(dict(task)) if task else None}
@@ -471,14 +475,14 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
                     scene_asset = loc if loc in scene_assets else ""
                     c.execute("""INSERT INTO shots(id,project_id,episode_id,scene_id,shot_no,duration_s,scene,size,angle,
                                  movement,picture,performance,blocking,dialogue,sfx,transition,original_text,
-                                 characters_json,scene_asset,status,source,updated_at)
-                                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                 characters_json,scene_asset,status,source,updated_at,overlay)
+                                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                               (_id("shot"), pid, ep["id"], sc["id"] if sc else "", n,
                                llm.fit_duration(s["duration"], s["dialogue"], lo, hi),
                                loc or (sc["heading"] if sc else ""), s["size"], s["angle"], s["movement"],
                                s["picture"], s["performance"], s["blocking"], s["dialogue"], s["sfx"],
                                s["transition"], s.get("original_text", ""), db.dump(s["characters"]), scene_asset,
-                               "storyboard_ready", source, db.now()))
+                               "storyboard_ready", source, db.now(), s.get("overlay", "")))
                 c.execute("UPDATE episodes SET final_path='', srt_path='', final_seconds=0 WHERE id=?", (ep["id"],))
             long_lines = [f"{ep['no']}-{n}" for n, s in enumerate(shots, start=1) if llm.speech_seconds(s["dialogue"]) > hi]
             results.append({"episode": ep["no"], "shots": len(shots), "source": source, "long_dialogue": long_lines})
@@ -529,6 +533,27 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
     # 提示词（@绑定）
     # ==================================================================
 
+    @staticmethod
+    def _prompt_warnings(positive: str, shot: dict, bible: dict) -> list[str]:
+        """道具一致性：故事圣经里的关键道具，提示词把它写成了“容易被误写成的东西”（实测：营业部电脑 → 手机），
+        或分镜提到了它而提示词漏掉；屏幕文字写进了画面。"""
+        out = []
+        src = " ".join(str(shot.get(k) or "") for k in ("picture", "dialogue", "original_text", "performance"))
+        for p in bible.get("props") or []:
+            name = p.get("name") or ""
+            if not name:
+                continue
+            in_src = name in src
+            for w in p.get("avoid") or []:
+                if w and w in positive and name not in positive:
+                    out.append(f"道具写错：分镜/圣经里是「{name}」，提示词写成了「{w}」")
+            if in_src and name not in positive and not any(w in positive for w in p.get("avoid") or []):
+                out.append(f"提示词漏了关键道具「{name}」")
+        for ov in (shot.get("overlay") or "").splitlines():
+            if len(ov.strip()) >= 4 and ov.strip() in positive:
+                out.append(f"屏幕文字「{ov.strip()[:12]}」写进了画面（应后期贴字）")
+        return out[:6]
+
     def _voices(self, assets: list[dict]) -> dict[str, str]:
         """角色 → 音色资产名。约定：音频资产叫「角色名音色」或「角色名声线」。"""
         names = {a["name"] for a in assets if a["kind"] in ("character", "creature")}
@@ -569,19 +594,20 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
         with db.tx() as c:
             for shot, item in zip(shots, data):
                 bindings, unresolved = refs.resolve(item["positive"], assets)
+                warns = self._prompt_warnings(item["positive"], shot, proj.get("bible") or {})
                 old = c.execute("SELECT * FROM prompts WHERE shot_id=?", (shot["id"],)).fetchone()
                 if old:
                     rev = old["rev"] + 1
                     c.execute("UPDATE prompts SET positive=?, negative=?, model=?, bindings_json=?, unresolved_json=?,"
-                              " rev=?, updated_at=? WHERE id=?",
+                              " warnings_json=?, rev=?, updated_at=? WHERE id=?",
                               (item["positive"], item["negative"], st["text_model"], db.dump(bindings),
-                               db.dump(unresolved), rev, db.now(), old["id"]))
+                               db.dump(unresolved), db.dump(warns), rev, db.now(), old["id"]))
                     self._journal(c, pid, "prompt", old["id"], rev, ["positive", "negative"], "ai")
                 else:
                     c.execute("INSERT INTO prompts(id,shot_id,positive,negative,model,bindings_json,unresolved_json,"
-                              "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                              "warnings_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                               (_id("prompt"), shot["id"], item["positive"], item["negative"], st["text_model"],
-                               db.dump(bindings), db.dump(unresolved), db.now(), db.now()))
+                               db.dump(bindings), db.dump(unresolved), db.dump(warns), db.now(), db.now()))
                 c.execute("UPDATE shots SET status='prompt_ready' WHERE id=? AND status='storyboard_ready'",
                           (shot["id"],))
         self.refresh_status(pid)

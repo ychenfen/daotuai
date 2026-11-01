@@ -645,7 +645,7 @@ class VideoMixin:
                     clip = {"path": j["local_path"], "seconds": j["seconds"],
                             "dialogue": self._subtitle_text(s["dialogue"]),
                             "trim_in": s.get("trim_in") or 0, "trim_out": s.get("trim_out") or 0,
-                            "xfade": s.get("xfade_s") or 0}
+                            "xfade": s.get("xfade_s") or 0, "overlay": s.get("overlay") or ""}
                     if dub_mode != "off" and s.get("dub"):
                         clip["dub"] = s["dub_path"]
                         clip["subs"] = [(x["start"], x["end"], x["text"]) for x in s["dub"].get("lines", [])]

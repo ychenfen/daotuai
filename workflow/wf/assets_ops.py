@@ -158,6 +158,7 @@ class AssetsMixin:
         llm.current_project.set(pid)
         data, source = await llm.extract_assets(self.agg, p["script_text"], p["style"], st["text_model"],
                                                 engine or st["engine"])
+        data = self._merge_bible(data, db.load(p["bible_json"] or "", {}) or {})
         added, forms_added = [], []
         with db.tx() as c:
             existing = {(r["kind"], r["name"]): r["id"] for r in c.execute(
@@ -181,6 +182,31 @@ class AssetsMixin:
                                   "forms": [f["name"] for f in a.get("forms") or []]})
         self.refresh_status(pid)
         return {"source": source, "added": added, "forms_added": forms_added, "state": self.get(pid)}
+
+    @staticmethod
+    def _merge_bible(data: dict, bible: dict) -> dict:
+        """有故事圣经时：人设卡的固定外貌补进角色描述（出图更稳）；道具以圣经道具表为准（全名），
+        抽取结果里属于“容易被误写成的东西”的不收（宁少勿滥，借鉴火宝短剧）。"""
+        if not bible:
+            return data
+        data = dict(data)
+        chars = {c["name"]: c for c in data.get("characters") or []}
+        for bc in bible.get("characters") or []:
+            desc = "；".join(x for x in (bc.get("tags"), bc.get("look")) if x)
+            if bc["name"] in chars:
+                if not chars[bc["name"]].get("description"):
+                    chars[bc["name"]]["description"] = desc
+            else:
+                chars[bc["name"]] = {"name": bc["name"], "description": desc, "aliases": [], "forms": []}
+        data["characters"] = list(chars.values())
+        bprops = bible.get("props") or []
+        if bprops:
+            avoid = {w for bp in bprops for w in bp.get("avoid") or []}
+            names = {bp["name"] for bp in bprops}
+            keep = [x for x in data.get("props") or [] if x["name"] not in avoid and x["name"] not in names]
+            data["props"] = [{"name": bp["name"], "description": bp.get("look") or "", "aliases": [], "forms": []}
+                             for bp in bprops] + keep
+        return data
 
     def add_asset(self, pid: str, kind: str, name: str, description: str = "",
                   aliases: list[str] | None = None, forms: list[str] | None = None) -> dict:

@@ -282,7 +282,40 @@ async def upload_script(pid: str, request: Request, filename: str = "script.txt"
 @app.post("/projects/{pid}/script/generate")
 async def generate_script(pid: str, body: dict = Body(...)):
     return await wf().generate_script(pid, body.get("idea", ""), int(body.get("episodes") or 3),
-                                      body.get("mode") or "replace", int(body.get("seconds_per_ep") or 90))
+                                      body.get("mode") or "replace", int(body.get("seconds_per_ep") or 60),
+                                      body.get("genre") or "", bool(body.get("auto_fix", True)))
+
+
+@app.get("/projects/{pid}/bible")
+def get_bible(pid: str):
+    from .scriptwriter import GENRES, paywall_episodes
+    b = wf().bible(pid)
+    return {"bible": b, "genres": GENRES, "paywall": paywall_episodes(len(b.get("beats") or [])) if b else []}
+
+
+@app.put("/projects/{pid}/bible")
+def put_bible(pid: str, body: dict = Body(...)):
+    return wf().set_bible(pid, body.get("bible") or body)
+
+
+@app.post("/projects/{pid}/script/review")
+async def review_script(pid: str, body: dict = Body(default={})):
+    return await wf().review_script(pid, body.get("episode_no"), body.get("seconds_per_ep"))
+
+
+@app.post("/projects/{pid}/script/revise")
+async def revise_script(pid: str, body: dict = Body(...)):
+    return await wf().revise_script(pid, int(body.get("episode_no") or 1))
+
+
+@app.get("/projects/{pid}/script/versions")
+def script_versions(pid: str):
+    return wf().script_versions(pid)
+
+
+@app.post("/projects/{pid}/script/versions/{vid}/restore")
+def restore_script(pid: str, vid: int):
+    return wf().restore_script(pid, vid)
 
 
 @app.post("/projects/{pid}/parse")

@@ -1052,6 +1052,93 @@ async def main() -> int:
         check("单集上限：超出就跳过这一集并写明原因", e1["status"] in ("failed", "done") and
               (e1["status"] == "done" or "单集上限" in "".join(e1["errors"])), json.dumps(e1, ensure_ascii=False)[:200])
 
+        print("\n[S] 剧本增强：故事圣经 / 节拍 / 指标 / 审核 / 改写 / 贴字与道具下游")
+        from wf import scriptwriter as sw  # noqa: E402
+        check("付费卡点：20 集按 10/30/50/70/90%，6 集只在中段和结尾，3 集在最后", sw.paywall_episodes(20) == [2, 6, 10, 14, 18]
+              and sw.paywall_episodes(6) == [3, 5] and sw.paywall_episodes(3) == [3],
+              str(sw.paywall_episodes(20)))
+        nb = sw.normalize_bible({"characters": [{"name": "甲"}], "beats": [{"ep": i, "hook_type": "反派反击", "mode": "乱"} for i in range(1, 7)]}, 6)
+        hts = [b["hook_type"] for b in nb["beats"]]
+        check("节拍表：钩子不连续 3 集同类、压放只认两种、卡点由代码定",
+              all(not (hts[i] == hts[i - 1] == hts[i - 2]) for i in range(2, 6)) and all(b["mode"] in ("压", "放") for b in nb["beats"])
+              and [b["ep"] for b in nb["beats"] if b["paywall"]] == sw.paywall_episodes(6), str(hts))
+        bad_ep = ("1-1 日 内 营业部 ·约20秒\n人物：孔宣、沈岚、股民甲、股民乙\n"
+                  "△孔宣盯着手机，屏幕上显示“买入成功”，他心想这下稳了，又站起来，又坐下，又拍桌\n"
+                  "孔宣：这一局我看得清清楚楚量化也算不过我你们都等着瞧吧\n")
+        props = [{"name": "营业部台式电脑", "look": "黑色", "avoid": ["手机", "平板"]}]
+        m = sw.metrics(bad_ep, 20, props)
+        check("代码指标：人数超标 / 屏幕文字没写贴字 / 长句 / 心理描写 / 动作太多 / 道具写错",
+              m["crowded_scenes"] and m["screen_text_unmarked"] and m["long_lines"] and m["banned_words"]
+              and m["busy_actions"] and m["misnamed_props"], json.dumps({k: m[k] for k in m if k != "issues"}, ensure_ascii=False)[:300])
+        check("分级：道具写错是严重问题 → 至少 C", sw.grade(m["issues"]) in ("C", "D") and sw.grade([]) == "A"
+              and sw.grade([{"severity": "严重"}] * 3) == "D", sw.grade(m["issues"]))
+        fixed = sw.mock_fix(bad_ep, {"props": props})
+        check("本地修正：屏幕文字挪到【贴字】、道具改回全名、去掉心理描写",
+              "【贴字】买入成功" in fixed and "营业部台式电脑" in fixed and "心想" not in fixed, fixed[:200])
+
+        sp = (await j(await c.post("/projects", json={"name": "剧本增强", "style": "真人"})))["id"]
+        g = await j(await c.post(f"/projects/{sp}/script/generate", json={"idea": "妖王转到人界炒股，强于量化", "episodes": 5,
+                                                                         "seconds_per_ep": 60, "genre": "穿越"}))
+        rv = g["reviews"]
+        check("分层写剧本：圣经 + 5 集 + 每集审核评级", len(g["bible"]["beats"]) == 5 and g["bible"]["characters"]
+              and set(rv) == {"1", "2", "3", "4", "5"} and all(v["grade"] in "ABCD" for v in rv.values())
+              and g["script_check"]["episodes"] == 5, json.dumps({k: v["grade"] for k, v in rv.items()}))
+        check("剧本格式：场次标注约N秒、带【贴字】行；场景名不被“·约N秒”污染",
+              "·约" in g["script_text"] and "【贴字】" in g["script_text"]
+              and all("约" not in sc["location"] for sc in [dict(x) for x in []]), g["script_text"][:120])
+        bb = await j(await c.get(f"/projects/{sp}/bible"))
+        check("故事圣经可读取，卡点集由代码给出", bb["bible"]["title"] is not None and bb["paywall"] == [1, 2, 3, 4, 5][:0] + sw.paywall_episodes(5),
+              json.dumps(bb["paywall"]))
+        b2 = dict(bb["bible"]); b2["props"] = props
+        await j(await c.put(f"/projects/{sp}/bible", json={"bible": b2}))
+        cur = (await j(await c.get(f"/projects/{sp}")))["script_text"]
+        await j(await c.post(f"/projects/{sp}/script", json={"text": cur.replace("△", "△孔宣盯着手机，屏幕上写着“买入成功”。△", 1)}))
+        r1 = await j(await c.post(f"/projects/{sp}/script/review", json={"episode_no": 1, "seconds_per_ep": 60}))
+        g1 = r1["reviews"]["1"]
+        check("体检现有剧本：指出道具写错、屏幕文字没写贴字", any("道具" in i["detail"] for i in g1["issues"])
+              and g1["metrics"]["screen_text_unmarked"], json.dumps(g1["issues"], ensure_ascii=False)[:300])
+        rr = await j(await c.post(f"/projects/{sp}/script/revise", json={"episode_no": 1}))
+        st2 = await j(await c.get(f"/projects/{sp}"))
+        ep1 = st2["script_text"].split("第2集")[0]
+        check("按体检改写本集：只动第 1 集、道具改回全名、屏幕文字变【贴字】",
+              rr["changed"] and "营业部台式电脑" in ep1 and "手机" not in ep1 and "【贴字】买入成功" in ep1
+              and st2["script_text"].count("第") >= 5, json.dumps({k: rr[k] for k in ("before", "after", "source")}, ensure_ascii=False))
+        vs = await j(await c.get(f"/projects/{sp}/script/versions"))
+        check("改写前自动存版本", len(vs["items"]) >= 1 and any("改写第1集前" in v["note"] for v in vs["items"]), json.dumps(vs["items"][:3], ensure_ascii=False))
+        vid = next(v["id"] for v in vs["items"] if "改写第1集前" in v["note"])
+        back = await j(await c.post(f"/projects/{sp}/script/versions/{vid}/restore"))
+        check("撤销到改写前的版本", "盯着手机" in back["script_text"], back["script_text"][:80])
+        await j(await c.post(f"/projects/{sp}/script/revise", json={"episode_no": 1}))
+        await j(await c.post(f"/projects/{sp}/parse?force=true"))
+        ex = await j(await c.post(f"/projects/{sp}/assets/extract?engine=local"))
+        st2 = await j(await c.get(f"/projects/{sp}"))
+        pnames = {a["name"] for a in st2["assets"] if a["kind"] == "prop"}
+        check("资产抽取用圣经道具表：有全名道具、不收“容易被误写成的东西”", "营业部台式电脑" in pnames and not ({"手机", "平板"} & pnames),
+              str(pnames))
+        sb = await j(await c.post(f"/projects/{sp}/storyboard?episode_no=1&engine=local"))
+        st2 = await j(await c.get(f"/projects/{sp}"))
+        ov = [s for s in st2["shots"] if s["episode_no"] == 1 and s.get("overlay")]
+        check("分镜：【贴字】进 overlay，不进画面", ov and all("买入成功" not in s["picture"] for s in ov), json.dumps([s.get("overlay") for s in ov], ensure_ascii=False))
+        W = wf_main.wf()
+        warn = W._prompt_warnings("参考资产：@孔宣 画面：@孔宣 盯着手机屏幕，屏幕显示买入成功", {"picture": "孔宣盯着营业部台式电脑",
+                                  "overlay": "买入成功"}, {"props": props})
+        check("提示词告警：道具写成替代物、屏幕文字写进画面", any("道具写错" in w for w in warn) and any("后期贴字" in w for w in warn),
+              json.dumps(warn, ensure_ascii=False))
+        await j(await c.post(f"/projects/{sp}/prompts?episode_no=1&engine=local"))
+        st2 = await j(await c.get(f"/projects/{sp}"))
+        check("提示词带 warnings 字段", all("warnings" in s["prompt"] for s in st2["shots"] if s["episode_no"] == 1 and s["prompt"]), "")
+        if HAS_FFMPEG:
+            await c.patch(f"/projects/{sp}/settings", json={"budget_rmb": 500})
+            await c.post(f"/projects/{sp}/videos", json={"episode_no": 1, "accept_stale": True, "allow_missing": True})
+            await W.wait_videos(sp, timeout_s=60, interval_s=0.05)
+            a = await j(await c.post(f"/projects/{sp}/assemble?episode_no=1&allow_partial=true"))
+            st2 = await j(await c.get(f"/projects/{sp}"))
+            srt = open(st2["episodes"][0]["srt_path"], encoding="utf-8").read()
+            check("合成：贴字作为字幕出现在镜头开头", "买入成功" in srt, srt[:200] + json.dumps(
+                [(s["code"], s.get("overlay"), (s["job"] or {}).get("status")) for s in st2["shots"] if s["episode_no"] == 1], ensure_ascii=False)
+                + json.dumps(a, ensure_ascii=False)[:300])
+        await W.drain_background()
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

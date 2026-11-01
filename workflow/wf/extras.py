@@ -214,21 +214,13 @@ class ExtrasMixin:
         return self.set_script(pid, text)
 
     async def generate_script(self, pid: str, idea: str, episodes: int = 3, mode: str = "replace",
-                              seconds_per_ep: int = 90) -> dict:
+                              seconds_per_ep: int = 60, genre: str = "", auto_fix: bool = True) -> dict:
         p = self._project_row(pid)
         st = self.settings(pid)
         if not (idea or "").strip():
             raise WorkflowError("先写一句灵感、故事梗概或贴一段小说")
-        episodes = max(1, min(30, int(episodes)))
-        llm.current_project.set(pid)
-        text, source = await llm.generate_script(self.agg, st["text_model"], idea, episodes, p["style"],
-                                                 3, seconds_per_ep, st["engine"])
-        if mode == "append" and p["script_text"].strip():
-            text = p["script_text"].rstrip() + "\n\n" + text
-        out = self.set_script(pid, text)
-        out["generated_source"] = source
-        self.notify(pid, "success", f"一键剧本完成：{episodes} 集", f"来源：{'模型' if source == 'real' else '本地模板'}")
-        return out
+        # 分层写：故事圣经 → 分集节拍 → 逐集写 → 体检 → 定向改写（见 scriptwriter.py）
+        return await self.write_script(pid, idea, episodes, seconds_per_ep, genre, auto_fix, mode)
 
     # ------------------------------------------------------------------
     # 项目导出 / 导入 / 封面

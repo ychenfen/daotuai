@@ -152,12 +152,16 @@ def scene_heading(line: str) -> dict | None:
     m = SCENE_HEAD_RE.match(line)
     if not m:
         return None
-    loc = (m.group("a") or m.group("b") or "").strip(" 　：:")
+    loc = re.sub(r"[·•（(]?\s*约?\s*\d+\s*秒[）)]?", "", (m.group("a") or m.group("b") or "")).strip(" 　：:·")
     loc = re.split(r"\s+", loc)[0] if loc else ""
     if not loc or len(loc) > 24:
         return None
     return {"location": loc, "time_of_day": (m.group("time") or "") if m.groupdict().get("time") else "",
             "heading": line.strip()}
+
+
+def scene_heading_any(text: str) -> bool:
+    return any(scene_heading(ln) for ln in (text or "").splitlines())
 
 
 def split_scenes(episode_no: int, text: str) -> list[dict]:
@@ -322,14 +326,17 @@ STORYBOARD_SYSTEM = """你是短剧分镜师。把一集剧本按场次拆成"�
 "characters":["本镜出场角色（用资产表里的名字；有形态时写成 名字（形态））"],
 "segments":[{"start":0,"end":3,"picture":"这一段的画面，含 <音效>"}],
 "performance":"表演要点：人物情绪、动作节奏、对手戏关系","blocking":"站位：人物在画面中的位置与朝向",
-"dialogue":"角色：台词（多句换行），没有就空字符串","sfx":"音效","transition":"与下一镜的衔接"}]}
+"dialogue":"角色：台词（多句换行），没有就空字符串","sfx":"音效","transition":"与下一镜的衔接",
+"overlay":"剧本里【贴字】行的文字（屏幕/短信上的字，后期贴），没有就空字符串"}]}
 要求：
 1. 时长在 %d~%d 秒之间，优先接近 %d 秒；segments 首尾相接覆盖整镜；
 2. 必须保留原剧本的人物、动作、台词，不得新增情节；
 3. 最多 %d 张卡；scene_code 用给定的场次编号；
 4. 有台词的卡，时长不得短于台词正常念完的时间（约每秒 4 个字，另留 1 秒）；一张卡装不下的台词拆到下一张卡；
 5. 每个时间段不短于 2 秒、只写一个看得见的主动作（写清起始姿态→动作→结束姿态）；5 秒的卡最多 2 段，
-   一张卡最多两人对话。动作多就拆成多张卡——视频模型在一张卡里只能可靠地演出一两个动作。"""
+   一张卡最多两人对话、同框看清脸的人不超过 2 个。动作多就拆成多张卡——视频模型在一张卡里只能可靠地演出一两个动作；
+6. 剧本里的【贴字】文字放进 overlay，不写进 segments 画面；画面只写“电脑屏幕上红绿K线跳动”这类看得见的描述；
+7. 每段画面都写清谁在画面哪里（如“孔宣在画面左侧，沈岚在右后方”），关键道具每次都写全名，宁可重复也别换叫法。"""
 
 
 SPEECH_CPS = 4.5   # 短剧台词正常语速：每秒约 4~5 个字
@@ -402,6 +409,8 @@ def mock_storyboard(scenes: list[dict], style: str, char_names: list[str], dur_m
 
     def close(cur, scene):
         if not cur["segs"]:
+            if cur["overlay"] and shots:      # 场末单独的贴字行挂到上一张卡
+                shots[-1]["overlay"] = "\n".join(filter(None, [shots[-1].get("overlay", "")] + cur["overlay"]))[:300]
             return
         total = sum(s[1] for s in cur["segs"])
         scale = 1.0
@@ -423,13 +432,19 @@ def mock_storyboard(scenes: list[dict], style: str, char_names: list[str], dur_m
             "performance": "；".join(cur["perf"])[:400],
             "blocking": "，".join(f"{n}在{POSITIONS[k % len(POSITIONS)]}" for k, n in enumerate(chars)),
             "dialogue": "\n".join(cur["lines"])[:600], "sfx": "、".join(dict.fromkeys(cur["sfx"]))[:200],
+            "overlay": "\n".join(cur["overlay"])[:300],
             "transition": "硬切", "original_text": "\n".join(cur["raw"])[:2000],
         })
 
     for scene in scenes:
-        cur = {"segs": [], "speakers": [], "lines": [], "perf": [], "sfx": [], "raw": []}
+        cur = {"segs": [], "speakers": [], "lines": [], "perf": [], "sfx": [], "raw": [], "overlay": []}
         for ln in [x.strip() for x in scene["text"].splitlines() if x.strip()]:
             if re.match(r"^\s*人物\s*[：:]", ln):
+                continue
+            tz = re.match(r"^\s*【贴字】\s*(.+)$", ln)
+            if tz:                      # 屏幕/短信文字：后期贴，不进画面和视频提示词
+                cur["overlay"].append(tz.group(1).strip())
+                cur["raw"].append(ln)
                 continue
             body = re.sub(r"^[△▲\-\s]+", "", ln)
             sfx = re.findall(r"[<＜]([^>＞]{1,20})[>＞]", body)
@@ -454,7 +469,7 @@ def mock_storyboard(scenes: list[dict], style: str, char_names: list[str], dur_m
             cur["raw"].append(ln)
             if sum(s[1] for s in cur["segs"]) >= target:
                 close(cur, scene)
-                cur = {"segs": [], "speakers": [], "lines": [], "perf": [], "sfx": [], "raw": []}
+                cur = {"segs": [], "speakers": [], "lines": [], "perf": [], "sfx": [], "raw": [], "overlay": []}
         close(cur, scene)
     return shots[:max_shots]
 
@@ -483,6 +498,7 @@ def _normalize_shots(raw: list, max_shots: int, char_names: list[str], dur_min: 
             "picture": picture[:2000], "performance": str(s.get("performance") or "")[:600],
             "blocking": str(s.get("blocking") or "")[:400], "dialogue": str(s.get("dialogue") or "")[:800],
             "sfx": str(s.get("sfx") or "")[:300], "transition": str(s.get("transition") or "")[:100],
+            "overlay": str(s.get("overlay") or "")[:300],
             "original_text": "",
         })
     return out
@@ -525,7 +541,8 @@ positive 必须按这个结构写：
 台词/旁白/音效：角色：{台词} <音效>
 转场：…】
 最后一行：""" + SUFFIX + """
-要求：提到角色、场景必须写成「@名字」或「@名字（形态）」（取自资产表），系统据此挂参考图保证一致；不写"参考图"字样；
+要求：提到角色、场景、道具必须写成「@名字」或「@名字（形态）」（取自资产表），系统据此挂参考图保证一致；不写"参考图"字样；
+不要把屏幕/短信上的具体文字写进画面（那些是后期贴字），只写屏幕的样子；道具名用资产表里的全名，不要换成别的东西；
 negative 写画面质量问题。"""
 
 
