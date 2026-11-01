@@ -22,7 +22,7 @@ def check(name, cond, detail=""):
 
 with httpx.Client(base_url=BASE, timeout=30, trust_env=False) as c:
     h = c.get("/healthz").json()
-    check("healthz", h["ok"] and h["version"] == "0.3.0", str(h))
+    check("healthz", h["ok"] and h["version"] == "0.4.0", str(h))
 
     check("充值", abs(c.post("/v1/wallet/topup", json={"amount_rmb": 20}, headers=U).json()["balance_rmb"] - 20) < 1e-9)
 
