@@ -73,7 +73,8 @@ BIBLE_SYSTEM = """你是短剧总编剧。先不写正文，只做“故事圣�
    avoid 写最容易被画错成的替代物（如电脑→手机、平板）。
 3. 每集只做“压”（主角受挫、积蓄情绪）或“放”（主角反击、释放爽感）之一，压放交替，前 3 集至少 1 次“放”。
 4. 集末钩子只能是三类之一，且不能连续 3 集同一类。
-5. 题材要可拍：每场出场人物不超过 3 个，避免大场面群戏、复杂特效连续动作。"""
+5. 题材要可拍：每场出场人物不超过 3 个，避免大场面群戏、复杂特效连续动作；不要写弹幕刷屏、人群围观这类画面。
+JSON 字符串里不要出现英文双引号，引用台词用「」。"""
 
 EPISODE_SYSTEM = """你是短剧编剧。按“故事圣经 + 本集节拍”写第 %d 集剧本正文，只输出剧本，格式严格如下：
 第%d集 集名
@@ -97,7 +98,8 @@ REVIEW_SYSTEM = """你是短剧剧本审核。下面给出：本集节拍、代�
  "summary":"一句话"}
 标准：开场 3 秒内要有动作或冲突；集末停在悬念；节拍里的反转和爽点要能在正文指出位置；每 60 秒至少 3 个情绪点；
 人物言行符合人设；可拍性看每场人数、动作是否一行一个、屏幕文字是否写成【贴字】、道具是否用全名。
-严重 = 不改不能拍或观众会划走；中等 = 明显影响效果；轻微 = 可改可不改。只写真实存在的问题。"""
+严重 = 不改不能拍或观众会划走；中等 = 明显影响效果；轻微 = 可改可不改。只写真实存在的问题。
+JSON 字符串里不要出现英文双引号，引用台词用「」。"""
 
 REVISE_SYSTEM_EP = """你是短剧编剧，按审核意见修改本集剧本。只改被点名的场次和问题，其他内容和格式保持不变；
 人物、道具继续用圣经里的全名；屏幕文字写成【贴字】行；每场标题末尾保留“·约N秒”。只输出改好的整集剧本。"""
@@ -164,7 +166,7 @@ def metrics(ep_text: str, target_s: int, props: list[dict] | None = None, charac
     scenes = llm.split_scenes(1, ep_text)
     declared, issues = 0.0, []
     est_total = 0.0
-    long_lines, crowded, screen_unmarked, banned, busy = [], [], [], [], []
+    long_lines, crowded, screen_unmarked, banned, busy, risky = [], [], [], [], [], []
     avoid = _avoid_map(props, characters)
     misnamed = []
     for k, sc in enumerate(scenes, start=1):
@@ -190,6 +192,10 @@ def metrics(ep_text: str, target_s: int, props: list[dict] | None = None, charac
                     screen_unmarked.append(body[:30])
                 if len(re.findall(r"[，,；;]", body)) >= 3 or len(body) > 45:
                     busy.append(body[:24])
+                for pat, why in llm.RISKY:
+                    mm = pat.search(body)
+                    if mm:
+                        risky.append(f"“{mm.group(0)}”{why}")
                 for w, name in scene_avoid.items():
                     if w in body and name not in body:
                         misnamed.append(f"“{w}”（应为{name}）")
@@ -211,10 +217,12 @@ def metrics(ep_text: str, target_s: int, props: list[dict] | None = None, charac
     out = {"scenes": len(scenes), "declared_seconds": round(declared, 1), "estimated_seconds": round(est_total, 1),
            "target_seconds": target_s, "long_lines": long_lines[:8], "crowded_scenes": crowded,
            "screen_text_unmarked": screen_unmarked[:5], "busy_actions": busy[:5], "banned_words": banned[:5],
-           "misnamed_props": sorted(set(misnamed))[:5], "tiezi": sum(1 for ln in _lines(ep_text) if TIEZI.match(ln))}
+           "misnamed_props": sorted(set(misnamed))[:5], "risky": sorted(set(risky))[:5], "tiezi": sum(1 for ln in _lines(ep_text) if TIEZI.match(ln))}
     if target_s and abs(total - target_s) > max(10, target_s * 0.15):
-        issues.append({"severity": "中等", "item": "可拍性", "scene": "", "detail": f"时长约 {total:.0f} 秒，目标 {target_s} 秒",
-                       "fix": "增删场次或台词，让各场秒数合计接近目标"})
+        # 超 30% 算严重：出片按秒计费，时长失控直接多花钱（实测第 3 集写到 80 秒 / 目标 60 秒）
+        sev = "严重" if abs(total - target_s) > target_s * 0.3 else "中等"
+        issues.append({"severity": sev, "item": "可拍性", "scene": "", "detail": f"时长约 {total:.0f} 秒，目标 {target_s} 秒",
+                       "fix": "删减或合并场次、压缩台词，让各场秒数合计接近目标" if total > target_s else "补一场或加动作/反应镜头"})
     if est_total and declared and est_total > declared * 1.4:
         issues.append({"severity": "中等", "item": "可拍性", "scene": "",
                        "detail": f"按台词和动作估算要 {est_total:.0f} 秒，标注只有 {declared:.0f} 秒",
@@ -224,7 +232,8 @@ def metrics(ep_text: str, target_s: int, props: list[dict] | None = None, charac
                                 ("screen_text_unmarked", "中等", "屏幕/短信文字写在动作行里", "改成单独的【贴字】行"),
                                 ("busy_actions", "轻微", "一行动作写了多个动作", "一行只写一个主动作"),
                                 ("banned_words", "轻微", "出现心理描写", "改成看得见的表情和动作"),
-                                ("misnamed_props", "严重", "关键道具被写成了别的东西", "改回圣经里的道具全名")):
+                                ("misnamed_props", "严重", "关键道具被写成了别的东西", "改回圣经里的道具全名"),
+                                ("risky", "轻微", "视频模型容易翻车的写法", "文字改【贴字】、人群改虚化背景、复杂动作拆开")):
         if out[name]:
             issues.append({"severity": sev, "item": "可拍性", "scene": "", "detail": f"{msg}：{'、'.join(out[name][:3])}",
                            "fix": fix})
@@ -338,7 +347,7 @@ async def review_episode(agg, model: str, text: str, beat: dict | None, m: dict,
             facts = {k: v for k, v in m.items() if k != "issues"}
             data = await llm._ask_json(agg, model, REVIEW_SYSTEM,
                                        f"本集节拍：{json.dumps(beat or {}, ensure_ascii=False)}\n"
-                                       f"代码指标：{json.dumps(facts, ensure_ascii=False)}\n剧本：\n{text[:8000]}", 2500)
+                                       f"代码指标：{json.dumps(facts, ensure_ascii=False)}\n剧本：\n{text[:8000]}", 3500)
             if data and isinstance(data.get("issues"), list):
                 issues += [i for i in data["issues"] if isinstance(i, dict) and i.get("detail")][:12]
                 scores = {}

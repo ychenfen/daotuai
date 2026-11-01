@@ -1055,6 +1055,13 @@ async def main() -> int:
 
         print("\n[S] 剧本增强：故事圣经 / 节拍 / 指标 / 审核 / 改写 / 贴字与道具下游")
         from wf import scriptwriter as sw  # noqa: E402
+        bad_json = '{"scores":{"开场钩子":8},"issues":[{"severity":"中等","detail":"孔宣说"这股妖气冲天"太长","fix":"拆开",}],"summary":"好"}'
+        pj = wfllm._extract_json(bad_json)
+        check("JSON 容错：字符串里的英文双引号、尾逗号能修好", pj and pj["issues"][0]["detail"].startswith("孔宣说") and pj["scores"]["开场钩子"] == 8,
+              json.dumps(pj, ensure_ascii=False))
+        mt = sw.metrics("1-1 日 内 营业部 ·约80秒\n人物：孔宣\n△直播间弹幕刷屏骂他。\n孔宣：好。\n", 60, [])
+        check("剧本指标：时长超 30% 算严重、弹幕这类易翻车写法被标出", any(i["severity"] == "严重" and "时长" in i["detail"] for i in mt["issues"])
+              and mt["risky"], json.dumps(mt["issues"], ensure_ascii=False)[:300])
         check("付费卡点：20 集按 10/30/50/70/90%，6 集只在中段和结尾，3 集在最后", sw.paywall_episodes(20) == [2, 6, 10, 14, 18]
               and sw.paywall_episodes(6) == [3, 5] and sw.paywall_episodes(3) == [3],
               str(sw.paywall_episodes(20)))

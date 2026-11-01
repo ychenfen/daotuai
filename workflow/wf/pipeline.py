@@ -537,13 +537,7 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
     # ==================================================================
 
     # 视频模型容易翻车的写法（OnlyShot 等实测 + 我们第 1 集）：写进提示词就提醒
-    RISKY = [
-        (re.compile(r"弹幕|标语|横幅|写着|印着|招牌上|告示|书法|写字|字幕滚动"), "画面里的文字会被画乱（改成后期贴字）"),
-        (re.compile(r"人群|众人|一群|围观|满屋|千军万马|人山人海"), "多人场面角色一致性差（改成虚化背景或删掉）"),
-        (re.compile(r"打字|弹琴|弹钢琴|数钱|手指特写|穿针|系鞋带"), "手部精细动作容易崩"),
-        (re.compile(r"镜子里|镜中|倒影"), "镜像/倒影容易出错"),
-        (re.compile(r"连续出拳|激烈打斗|翻滚|连环|空翻"), "复杂连续动作演不出来（拆成多张卡）"),
-    ]
+    RISKY = llm.RISKY
 
     @classmethod
     def _risky_words(cls, positive: str) -> list[str]:

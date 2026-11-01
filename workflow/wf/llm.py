@@ -35,6 +35,14 @@ def record_charge(res: dict) -> None:
             log.exception("记录文本花费失败")
 
 SIZES = ["史诗大远景", "全景", "中景", "近景", "特写"]
+# 视频模型容易翻车的写法（OnlyShot 等实测 + 我们第 1 集）：剧本指标和提示词告警共用
+RISKY = [
+    (re.compile(r"弹幕|标语|横幅|写着|印着|招牌上|告示|书法|写字|字幕滚动"), "画面里的文字会被画乱（改成后期贴字）"),
+    (re.compile(r"人群|众人|一群|围观|满屋|千军万马|人山人海"), "多人场面角色一致性差（改成虚化背景或删掉）"),
+    (re.compile(r"打字|弹琴|弹钢琴|数钱|手指特写|穿针|系鞋带"), "手部精细动作容易崩"),
+    (re.compile(r"镜子里|镜中|倒影"), "镜像/倒影容易出错"),
+    (re.compile(r"连续出拳|激烈打斗|翻滚|连环|空翻"), "复杂连续动作演不出来（拆成多张卡）"),
+]
 SUB_SIZES = ["中景", "近景", "全景", "特写"]          # 本地分镜的子镜头景别轮换（借鉴火宝：一卡 2~4 个子镜头、景别有变化）
 SUB_SIZE_SET = {"远景", "全景", "中景", "近景", "特写", "大远景", "中近景"}
 ANGLES = ["俯拍", "平视", "仰拍", "低机位", "过肩"]
@@ -69,10 +77,45 @@ def _extract_json(text: str) -> dict | None:
     start, end = t.find("{"), t.rfind("}")
     if start < 0 or end <= start:
         return None
+    body = t[start:end + 1]
     try:
-        return json.loads(t[start:end + 1])
+        return json.loads(body)
     except json.JSONDecodeError:
+        pass
+    # 常见坏法（实测 DeepSeek）：字符串里用英文双引号引台词、尾逗号。修一下再试
+    fixed = re.sub(r",\s*([}\]])", r"\1", body)
+    fixed = _escape_inner_quotes(fixed)
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        log.warning("JSON 解析失败：%s", body[:300].replace("\n", " "))
         return None
+
+
+def _escape_inner_quotes(s: str) -> str:
+    """把 JSON 字符串值里没转义的英文双引号换成中文引号：引号后面紧跟 , : } ] 或换行的才算结构引号。"""
+    out, in_str, i = [], False, 0
+    while i < len(s):
+        ch = s[i]
+        if ch == "\\" and in_str:
+            out.append(s[i:i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            if not in_str:
+                in_str = True
+                out.append(ch)
+            else:
+                rest = s[i + 1:].lstrip(" \t")
+                if not rest or rest[0] in ",:}]\n\r":
+                    in_str = False
+                    out.append(ch)
+                else:
+                    out.append("”")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _clamp(v, lo, hi, default):
@@ -339,6 +382,7 @@ STORYBOARD_SYSTEM = """你是短剧分镜师。把一集剧本按场次拆成"�
    一张卡最多两人对话、同框看清脸的人不超过 2 个。动作多就拆成多张卡——视频模型在一张卡里只能可靠地演出一两个动作；
 6. 剧本里的【贴字】文字放进 overlay，不写进 segments 画面；画面只写“电脑屏幕上红绿K线跳动”这类看得见的描述；
 8. 一张卡 2~4 个子镜头（segments），景别要有变化（例如 中景→近景→特写），说台词的段用近景或特写，不跨场；
+9. 超过 20 字的长台词在语义停顿处拆成两段，后一段切到听者的反应镜头（声音仍是说话人，听者不张嘴）；
 7. 每段画面都写清谁在画面哪里（如“孔宣在画面左侧，沈岚在右后方”），关键道具每次都写全名，宁可重复也别换叫法。"""
 
 
@@ -392,6 +436,10 @@ def shot_density(shot: dict) -> list[str]:
     need = speech_seconds(shot.get("dialogue") or "")
     if need > dur + 0.5:
         out.append(f"台词约需 {need:g} 秒，镜头只有 {dur:g} 秒")
+    long_lines = [m.group(2) for m in re.finditer(r"^\s*([^：:\n]{1,12})[：:]\s*(.+)$", shot.get("dialogue") or "", re.M)
+                  if len(re.sub(r"[\W_]", "", re.sub(r"[（(][^）)]*[）)]", "", m.group(2)))) > 20]
+    if long_lines and len(segs) < 2:
+        out.append(f"长台词（{long_lines[0][:10]}…）建议在停顿处切到听者反应镜头")
     speakers = {re.sub(r"[（(].*$", "", m.group(1)) for m in re.finditer(r"^\s*([^：:\n]{1,12})[：:]", shot.get("dialogue") or "", re.M)}
     speakers -= {"旁白", "画外音", "OS", "VO"}
     if len(speakers) >= 3:
