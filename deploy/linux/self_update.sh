@@ -51,7 +51,7 @@ BK=$U/prev.tar
    --exclude=./workflow/data --exclude=./aggregator/data --exclude=./ACCESS.txt .) 2>/dev/null
 git archive "$NEW" | tar x -C "$R"
 echo "$NEW" > "$R/REVISION"
-$RESTART
+$RESTART 9>&-
 ok=1
 for p in 8010 8011; do
   for i in $(seq 1 60); do curl -fs "http://127.0.0.1:$p/healthz" >/dev/null && break; sleep 0.5; done
@@ -62,6 +62,6 @@ if [ $ok = 1 ]; then
 else
   log "新版本起不来，回滚"
   tar xf "$BK" -C "$R"; echo "$CUR" > "$R/REVISION"; echo "$NEW" > "$U/failed_rev"
-  $RESTART
+  $RESTART 9>&-
   status "rolled_back" "新版本 ${NEW:0:7} 启动失败，已回滚到 ${CUR:0:7}" "$NEW"
 fi

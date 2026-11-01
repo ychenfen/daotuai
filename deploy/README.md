@@ -53,6 +53,31 @@ sudo systemctl restart daotuai-workflow daotuai-aggregator
 
 数据库每次启动自动备份到 `workflow/data/backups`、`aggregator/data/backups`（各留 10 份）。
 
+## 自动更新与每日备份
+
+`install.sh` 会装两个定时任务：
+
+| 定时任务 | 做什么 |
+|---|---|
+| `daotuai-update.timer`（每 10 分钟） | GitHub `main` 有新提交 → 拉到 `data/update/stage` → 装依赖 → 跑全部测试（临时库、强制模拟）→ **全过才**替换代码并重启 → 两个服务健康检查不过就回滚到上一版。同一个失败版本不会反复试。结果写 `data/update/status.json`，工作台首页“存储与运行状态”里能看到 |
+| `daotuai-backup.timer`（每天 04:30） | 两个数据库在线备份到 `data/daily/<日期>/`，留 14 天（media 太大不在这里备份） |
+
+自动更新需要一次性在 GitHub 加只读部署公钥：`install.sh` 跑完会打印 `/opt/daotuai/.deploy/id_ed25519.pub`，
+到 `ychenfen/daotuai` → Settings → Deploy keys → Add deploy key，粘贴，不勾 “Allow write access”。
+之后推到 `main` 的代码 10 分钟内自动上线，不再需要电脑开机。
+
+```bash
+systemctl list-timers 'daotuai-*'
+cat /opt/daotuai/data/update/status.json
+tail -f /opt/daotuai/data/logs/update.log
+sudo systemctl start daotuai-update.service      # 立即检查一次
+```
+
+## LibTV 授权
+
+浏览器打开工作台的“生成设置 → 连接 LibTV”，地址走 `https://<域名><前缀>/libtv/login`，授权后回跳
+`https://<域名><前缀>/libtv/callback`（工作台转发给只监听本机的聚合层）。回跳地址由 `push_from_windows.sh`
+写进服务器 `.env` 的 `LIBTV_REDIRECT_URI`。
+
 ## 已知限制
 
-- LibTV 登录回调地址仍是 `127.0.0.1:8010`，在服务器上授权要另外配（暂未做）。
