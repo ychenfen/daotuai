@@ -585,6 +585,21 @@ def density(pid: str, episode_no: int | None = None):
     return wf().density(pid, episode_no)
 
 
+@app.get("/api/storage")
+def storage():
+    return wf().storage()
+
+
+@app.get("/api/ops")
+def ops_status():
+    return wf().ops_status()
+
+
+@app.post("/projects/{pid}/cleanup")
+def cleanup(pid: str, body: dict = Body(default={})):
+    return wf().cleanup(pid, bool(body.get("dry_run", True)), int(body.get("keep_versions", 1)))
+
+
 @app.post("/projects/{pid}/export")
 async def export_episode(pid: str, body: dict = Body(...)):
     return await wf().export_episode(pid, int(body.get("episode_no") or 1), body.get("preset") or "douyin",

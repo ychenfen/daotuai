@@ -177,7 +177,31 @@ function pgHome() {
     <div class="card"><div class="muted small">完整制作流程</div><h2>一键成片</h2><div class="muted">从剧本进入 AI 制作工作流：资产 → 分镜 → 站位 → 提示词 → 视频 → 成片。</div>
       <button class="primary" style="margin-top:14px" onclick="S.pid?go('script'):toast('先新建或选择项目',true)">开始制作 →</button></div>
     <div class="card"><div class="muted small">独立创作模块</div><h2>一键剧本</h2><div class="muted">从小说、故事或一句灵感，创作分集剧本。</div>
-      <button class="primary" style="margin-top:14px" onclick="scriptGenModal()">开始创作 ↗</button></div></div>`;
+      <button class="primary" style="margin-top:14px" onclick="scriptGenModal()">开始创作 ↗</button></div></div>
+  <div class="card" id="storageBox"><div class="row"><h3 style="margin:0">存储与运行状态</h3><span class="spacer"></span><button class="small" onclick="loadStorage()">查看</button></div>
+    <div class="small muted">各项目素材占用、磁盘余量、数据库备份；可清理没选用的旧视频版本。</div></div>`;
+}
+const mb = b => (b / 1048576).toFixed(b > 1073741824 ? 0 : 1) + ' MB';
+async function loadStorage() {
+  const box = $('#storageBox'); if (!box) return;
+  try {
+    const [s, o] = await Promise.all([api('GET', '/api/storage'), api('GET', '/api/ops')]);
+    const d = s.disk || {};
+    box.innerHTML = `<div class="row"><h3 style="margin:0">存储与运行状态</h3><span class="spacer"></span><button class="small" onclick="loadStorage()">刷新</button></div>
+      <div class="row small" style="margin-top:6px"><span class="badge ${d.used_pct > 85 ? 'bad' : d.used_pct > 70 ? 'warn' : 'ok'}">磁盘已用 ${d.used_pct ?? '?'}% · 剩 ${d.free ? mb(d.free) : '?'}</span>
+        <span class="badge">素材共 ${mb(s.total_bytes)}</span><span class="badge">在跑视频 ${o.running_jobs}</span><span class="badge">后台任务 ${o.running_tasks}</span>
+        <span class="badge">备份 ${o.backups} 份${o.last_backup ? ' · 最近 ' + esc(o.last_backup) : ''}</span><span class="badge">已运行 ${(o.uptime_s / 3600).toFixed(1)} 小时</span></div>
+      <table class="small" style="margin-top:8px;width:100%"><tr class="muted"><td>项目</td><td>占用</td><td>明细</td><td></td></tr>
+      ${s.projects.map(p => `<tr><td>${esc(p.name)}</td><td>${mb(p.bytes)}</td><td class="muted">${Object.entries(p.parts).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${esc(k)} ${mb(v)}`).join(' · ')}</td>
+        <td>${p.orphan ? '' : `<button class="small" onclick="cleanupProj('${p.project}','${esc(p.name)}',this)">清理旧版本</button>`}</td></tr>`).join('')}</table>`;
+  } catch (e) { toast(e.message, true); }
+}
+async function cleanupProj(pid, name, btn) {
+  const pv = await api('POST', `/projects/${pid}/cleanup`, {dry_run: true, keep_versions: 1});
+  if (!pv.files) return toast('没有可清理的文件');
+  if (!confirm(`「${name}」可清理 ${pv.mb} MB：${pv.jobs} 个没选用的旧视频版本（每镜保留当前版本、审片通过的和最近 1 个旧版本）、旧质检抽帧和旧配音分句。\n版本记录、提示词、质检结论都保留，只是旧版本不能再本地播放。继续？`)) return;
+  await act(btn, () => api('POST', `/projects/${pid}/cleanup`, {dry_run: false, keep_versions: 1}), r => `已清理 ${r.mb} MB`);
+  loadStorage();
 }
 function projCard(p) {
   return `<div class="card proj"><div class="cv" onclick="go('script','${p.id}')" style="cursor:pointer">${p.cover_url ? `<img src="${esc(p.cover_url)}">` : esc(p.name.slice(0, 1))}

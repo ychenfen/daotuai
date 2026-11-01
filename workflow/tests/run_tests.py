@@ -934,6 +934,34 @@ async def main() -> int:
             check("剧集列出已导出的文件", {x["preset"] for x in st["episodes"][0]["exports"]} >= {"douyin", "master"},
                   json.dumps(st["episodes"][0]["exports"], ensure_ascii=False))
 
+        print("\n[Z4] 存储与清理")
+        stg = await j(await c.get("/api/storage"))
+        mine = next((x for x in stg["projects"] if x["project"] == pid), None)
+        check("存储用量：按项目、按目录统计，含磁盘余量", mine and mine["bytes"] > 0 and "videos" in mine["parts"]
+              and stg["disk"].get("free", 0) > 0, json.dumps(mine, ensure_ascii=False)[:200])
+        ops = await j(await c.get("/api/ops"))
+        check("运行状态：项目数、在跑任务、媒体占用", ops["projects"] >= 1 and "running_jobs" in ops and ops["media_bytes"] > 0,
+              json.dumps(ops)[:200])
+        if HAS_FFMPEG:
+            await wf_main.wf().wait_videos(pid, timeout_s=30, interval_s=0.05)
+            st = await j(await c.get(f"/projects/{pid}"))
+            multi = [s for s in st["shots"] if len([x for x in s["jobs"] if x["status"] == "succeeded" and x["local_path"]]) >= 2]
+            pv = await j(await c.post(f"/projects/{pid}/cleanup", json={"dry_run": True, "keep_versions": 0}))
+            check("清理预览：只列出未选用旧版本，不删文件", pv["dry_run"] and pv["jobs"] >= len(multi) and pv["files"] >= 1
+                  and all(os.path.exists(os.path.join(os.environ["WORKFLOW_MEDIA"], f)) for f in pv["sample"]),
+                  json.dumps(pv, ensure_ascii=False)[:300])
+            sel_paths = [s["job"]["local_path"] for s in st["shots"] if s["job"] and s["job"]["local_path"]]
+            done_ = await j(await c.post(f"/projects/{pid}/cleanup", json={"dry_run": False, "keep_versions": 0}))
+            st = await j(await c.get(f"/projects/{pid}"))
+            check("清理执行：旧版本文件删掉、当前选用的保留", done_["files"] == pv["files"]
+                  and all(os.path.exists(p_) for p_ in sel_paths)
+                  and not any(os.path.exists(os.path.join(os.environ["WORKFLOW_MEDIA"], f)) for f in pv["sample"]),
+                  json.dumps({"n": [done_["files"], pv["files"]], "sel_missing": [p_ for p_ in sel_paths if not os.path.exists(p_)][:3],
+                              "left": [f for f in pv["sample"] if os.path.exists(os.path.join(os.environ["WORKFLOW_MEDIA"], f))][:3]},
+                             ensure_ascii=False)[:400])
+            pv2 = await j(await c.post(f"/projects/{pid}/cleanup", json={"dry_run": True, "keep_versions": 0}))
+            check("再预览为 0（幂等）", pv2["files"] == 0, json.dumps(pv2)[:200])
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:
