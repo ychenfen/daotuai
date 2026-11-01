@@ -873,6 +873,7 @@ function qcPanel(j) {
     <span class="spacer"></span><button class="small" onclick="qcJob('${j.id}',this)">重新质检</button>
     ${q.issues.length ? `<button class="small" onclick="retakeShot('${j.shot_id}',this)" title="把下面的问题写进提示词再出一版">按意见重抽</button>` : ''}</div>
     <div class="small" style="margin-top:6px">${esc(q.summary)}</div>
+    ${q.prompt_conflict ? `<div class="small warnc" style="margin-top:4px">⚠ 提示词和分镜不一致：${esc(q.prompt_conflict)}（重抽会先按分镜改提示词）</div>` : ''}
     ${q.issues.length ? `<ul class="small" style="margin:6px 0 0 18px;padding:0">${q.issues.map(i => `<li><b>${esc(i.type)}</b>：${esc(i.detail)}</li>`).join('')}</ul>` : ''}
     <div class="small muted" style="margin-top:4px">${q.checks.map(c => `${c.ok ? '✓' : '✗'} ${esc(c.name)}（${esc(c.detail)}）`).join(' · ')}</div>
     ${q.note ? `<div class="small muted">${esc(q.note)}</div>` : ''}

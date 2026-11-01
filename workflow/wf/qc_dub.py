@@ -61,11 +61,14 @@ QC_PROMPT = """你是严格的短剧视频质检员。前几张是本镜头应�
 请按分镜要求逐项核对，输出 JSON（不要其他文字）：
 {"character_consistency":0-100,"prompt_adherence":0-100,
  "issues":[{"type":"角色不一致|画面不符|字幕水印|画面崩坏|多余人物|其他","severity":"轻微|明显|严重","detail":"一句话"}],
+ "prompt_conflict":"",
  "summary":"一句话结论"}
 character_consistency：只看角色长相、发型、服装是否与参考图一致。
 prompt_adherence：只看画面是否演出了分镜写的动作、情绪、景别和关键道具。分镜要求的关键动作没有出现，最多 50 分；
   画面内容与分镜基本无关，最多 30 分。
 severity：严重 = 观众一眼能看出、必须重抽；明显 = 影响观感、建议重抽；轻微 = 可以接受。
+prompt_conflict：最后会给出当时发给视频模型的提示词。如果提示词本身和分镜不一致（例如分镜写电脑屏幕、提示词写手机），
+  一句话写出哪里不一致、应该以分镜为准改成什么；一致就给空字符串。成片照着错误提示词演，问题在提示词，不在模型。
 不算问题的：屏幕/纸面上应出现的具体文字、数字没画出来（视频模型画不准，后期贴字；只看有没有对应的屏幕或道具）；
 角色服装与场景时代不同（以角色参考图为准，穿越题材常见）。
 只写看得到的问题，不要编造；没有问题 issues 给空数组。"""
@@ -185,7 +188,7 @@ class QcDubMixin:
         return out
 
     async def _qc_vision(self, pid: str, s: dict, frames: list[str], refs_: list[tuple[str, str]],
-                         model: str) -> tuple[dict | None, float, str]:
+                         model: str, prompt: str = "") -> tuple[dict | None, float, str]:
         content: list[dict] = [{"type": "text", "text": QC_PROMPT}]
         for name, path in refs_:
             content += [{"type": "text", "text": f"参考：{name}"},
@@ -195,7 +198,8 @@ class QcDubMixin:
                         {"type": "image_url", "image_url": {"url": media.data_uri(p)}}]
         content.append({"type": "text", "text": (
             f"分镜 {s['code']}（{s.get('duration_s')}秒，{s.get('size', '')} {s.get('angle', '')} {s.get('movement', '')}）\n"
-            f"画面：{s.get('picture', '')}\n表演：{s.get('performance', '')}\n人物：{'、'.join(s.get('characters') or [])}")})
+            f"画面：{s.get('picture', '')}\n表演：{s.get('performance', '')}\n人物：{'、'.join(s.get('characters') or [])}"
+            + (f"\n\n当时发给视频模型的提示词：\n{prompt[:1500]}" if prompt else ""))})
         llm.current_project.set(pid)
         res = await self.agg.chat(model, [{"role": "user", "content": content}], max_tokens=700, temperature=0.1)
         llm.record_charge(res)
@@ -243,7 +247,7 @@ class QcDubMixin:
             else:
                 try:
                     refs_ = await self._qc_refs(pid, s, proj["assets"])
-                    vis, charged, bad = await self._qc_vision(pid, s, frames, refs_, model)
+                    vis, charged, bad = await self._qc_vision(pid, s, frames, refs_, model, j.get("prompt_snapshot") or "")
                     if vis is None:
                         note = f"视觉模型没给出可解析的结果：{bad}"
                 except AggError as e:
@@ -268,6 +272,7 @@ class QcDubMixin:
              "vision": bool(vis), "model": model if vis else "",
              "character_consistency": (vis or {}).get("character_consistency"),
              "prompt_adherence": (vis or {}).get("prompt_adherence"),
+             "prompt_conflict": str((vis or {}).get("prompt_conflict") or "").strip()[:300],
              "note": note, "frames": frames, "charged_rmb": round(charged, 5), "at": db.now()}
         with db.tx() as c:
             c.execute("UPDATE jobs SET qc_json=? WHERE id=?", (db.dump(q), job_id))

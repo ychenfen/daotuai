@@ -52,6 +52,8 @@ class ReviewMixin:
             issues += serious or ([] if q["verdict"] == "pass" and not explicit else q.get("issues", []))
         if j.get("review") == "rejected":
             issues.append({"type": "人工意见", "severity": "严重", "detail": j.get("review_note") or "审片打回"})
+        if issues and q and q.get("prompt_conflict"):   # 提示词本身写错了：先改提示词，排在最前
+            issues.insert(0, {"type": "提示词与分镜不一致", "severity": "严重", "detail": q["prompt_conflict"]})
         return issues[:8]
 
     async def retake_shots(self, pid: str, shot_ids: list[str] | None = None, episode_no: int | None = None,

@@ -878,6 +878,25 @@ async def main() -> int:
             os.environ["WORKFLOW_LLM"] = "mock"
             W.agg.chat = orig_chat
         check("模型新增的 @ 是资产表里的名字 → 接受；不认识的 → 退回本地规则", s_ok == "real" and s_no == "mock", f"{s_ok}/{s_no}")
+
+        async def drop_chat(model, messages, **kw):
+            pos = messages[1]["content"].split("原提示词：\n", 1)[1].split("\n\n问题", 1)[0]
+            pos = pos.replace("@手机", "电脑交易屏幕") if "@手机" in pos else pos.replace("@孔宣", "他")
+            return {"choices": [{"message": {"content": json.dumps({"positive": pos, "changes": ["改"]}, ensure_ascii=False)}}],
+                    "billing": {"charged_rmb": 0}}
+        W.agg.chat = drop_chat
+        try:
+            os.environ["WORKFLOW_LLM"] = "auto"
+            base_p = "参考资产：@孔宣 画面：@孔宣 盯着@手机 屏幕，眼神笃定，嘴角微扬。" * 2
+            _, _, s_prop = await wfllm.revise_prompt(W.agg, "x", base_p, [{"type": "提示词与分镜不一致", "detail": "应为电脑屏幕"}], ["孔宣"])
+            _, _, s_char = await wfllm.revise_prompt(W.agg, "x", "参考资产：@孔宣 画面：@孔宣 抬头。" * 2, [{"type": "画面不符", "detail": "d"}], ["孔宣"])
+        finally:
+            os.environ["WORKFLOW_LLM"] = "mock"
+            W.agg.chat = orig_chat
+        check("改写可以删掉写错的道具 @手机；删人物 @孔宣 → 退回本地规则", s_prop == "real" and s_char == "mock", f"{s_prop}/{s_char}")
+        iss = W._retake_issues({"qc": {"verdict": "warn", "issues": [{"type": "画面不符", "severity": "明显", "detail": "看手机"}],
+                                       "prompt_conflict": "分镜写电脑屏幕，提示词写 @手机"}}, True, ("fail",))
+        check("质检发现提示词与分镜不一致 → 排在重抽问题最前", iss[0]["type"] == "提示词与分镜不一致", json.dumps(iss, ensure_ascii=False))
         # 拆卡
         tgt = next(s for s in st["shots"] if s["episode_no"] == 1 and not any(x["status"] in ("submitted", "running") for x in s["jobs"]))
         await c.patch(f"/shots/{tgt['id']}", json={"expected_rev": tgt["rev"], "fields": {

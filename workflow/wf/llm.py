@@ -702,8 +702,9 @@ REVISE_SYSTEM = """你是 AI 视频提示词修改师。给你一条视频提示
 - 字幕水印：强调画面不出现任何文字、字幕、水印；
 - 角色不一致：强调外观与 @角色 参考一致（发型、服装、配色）；
 - 画面崩坏：降低动作幅度，减少同时运动的人数。
+- 问题是“提示词与分镜不一致”：以分镜为准改正提示词（例如把错误的道具 @手机 换成分镜里的电脑交易屏幕），错误的道具/场景 @引用可以删掉；
 - 要求屏幕/纸面上出现的具体文字或数字：视频模型画不准，改写成看得见的画面（如“电脑屏幕上是红绿交替的交易界面”），文字留给后期贴字；
-保留原有结构和所有「@名字」「@名字（形态）」写法，不删除 @；只能引用资产表里已有的名字。只输出 JSON：
+保留原有结构；人物的「@名字」「@名字（形态）」一个都不能删；只能引用资产表里已有的名字。只输出 JSON：
 {"positive":"改好的完整提示词","changes":["改了什么（一句话）"]}"""
 
 _MENTION_RE = re.compile(r"@[^\s@，,、；;：:。！？!?{}【】<>“”\"]+")
@@ -719,6 +720,8 @@ def _fix_line(issue: dict, characters: list[str]) -> str:
         return "画面中不出现任何文字、字幕、水印、标志"
     if t == "角色不一致":
         return "角色外观（发型、服装、配色、体型）严格与参考一致，全程不变"
+    if t == "提示词与分镜不一致":
+        return f"以分镜为准：{d}" if d else ""
     if t == "画面崩坏":
         return "动作幅度适中、速度放慢，人物五官和肢体保持正常"
     if not d:
@@ -765,7 +768,9 @@ async def revise_prompt(agg: Agg, model: str, prompt: str, issues: list[dict], c
             allowed = set(known or []) | {_mention_base(x) for x in old_m}
             # 中文里 @名字 后面常直接接动作（“@孔宣盯着屏幕”），按“以已知名字开头”判断，和 refs.resolve 的最长匹配一致
             extra = {x for x in new_m - old_m if not any(_mention_base(x).startswith(n) for n in allowed if n)}
-            lost = {x for x in old_m if not any(y.startswith(x) for y in new_m)}
+            # 人物引用一个都不能丢；道具/场景引用可以删（提示词写错道具时要能改掉，实测“@手机”应为电脑屏幕）
+            chars = {re.sub(r"[（(].*$", "", c) for c in characters}
+            lost = {x for x in old_m if not any(y.startswith(x) for y in new_m) and _mention_base(x) in chars}
             if new and not lost and not extra and len(new) > len(prompt) * 0.6:
                 if SUFFIX in prompt and SUFFIX not in new:
                     new = new.rstrip() + "\n" + SUFFIX
