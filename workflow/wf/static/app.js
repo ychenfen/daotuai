@@ -125,7 +125,7 @@ async function load() {
 function renderChrome() {
   $('#rail').innerHTML = `<div class="logo">剧</div>` + PAGES.map(([k, ic, t]) =>
     `<div class="nav ${S.page === k ? 'on' : ''}" title="${NEED_PROJECT.has(k) && !S.pid ? '先在首页新建或选择一个项目' : t}" onclick="go('${k}')"><span class="ic">${ic}</span>${t}</div>`).join('')
-    + `<div class="ver">v0.3</div>`;
+    + `<div class="ver">v0.4</div>`;
   const p = S.p, sp = p && p.spend, t = p && p.task, busy = t && (t.status === 'running' || t.status === 'queued');
   const pct = sp ? (sp.budget_rmb > 0 ? Math.min(100, sp.total_rmb / sp.budget_rmb * 100) : 100) : 0;
   $('#top').innerHTML = `<span class="title">${esc((PAGES.find(x => x[0] === S.page) || [])[2] || '')}</span>
@@ -1101,7 +1101,7 @@ async function clearChats() { if (confirm('清空全部对话记录？')) { awai
 function pgHelp() {
   const step = (t, sub, items, page) => `<div class="card"><h3>${t}</h3><div class="muted small">${sub}</div><ol>${items.map(x => `<li>${x}</li>`).join('')}</ol>
     ${page ? `<button onclick="go('${page}')">前往${(PAGES.find(p => p[0] === page) || [])[2]}</button>` : ''}</div>`;
-  return `<div class="card"><div class="muted small">短剧工作台 v0.3 · 本机项目、资产版本、站位图、提示词、视频任务和成片，一次讲清</div>
+  return `<div class="card"><div class="muted small">短剧工作台 v0.4 · 本机项目、资产版本、站位图、提示词、视频任务和成片，一次讲清</div>
     <h2 style="margin:6px 0">从剧本到成片</h2><div class="flow">${['项目', '剧本', '资产', '分镜', '站位图', '提示词', '视频', '质检', '重抽/审片', '剪辑', '配音', '成片', '发布'].map(x => `<span>${x}</span>`).join('→')}</div>
     <div class="small muted" style="margin-top:8px">模型分“真实 / 模拟”：模拟零成本，用来练手和走流程；真实会扣费，受项目预算约束（超预算的视频不会提交）。</div></div>
   <div class="grid tut">

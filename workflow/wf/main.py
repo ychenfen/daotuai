@@ -83,7 +83,7 @@ async def lifespan(_: FastAPI):
             await client.aclose()
 
 
-app = FastAPI(title="短剧工作台（内部自用）", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="短剧工作台（内部自用）", version="0.4.0", lifespan=lifespan)
 db.init()
 
 

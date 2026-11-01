@@ -49,7 +49,7 @@ async def lifespan(_: FastAPI):
             reaper.cancel()
 
 
-app = FastAPI(title="Daotu Model Aggregator", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Daotu Model Aggregator", version="0.4.0", lifespan=lifespan)
 db.init()  # 导入即建表：ASGI 测试/无 lifespan 的宿主也能直接用
 
 
