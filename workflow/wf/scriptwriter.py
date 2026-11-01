@@ -345,9 +345,13 @@ async def review_episode(agg, model: str, text: str, beat: dict | None, m: dict,
     if llm.use_model(engine):
         try:
             facts = {k: v for k, v in m.items() if k != "issues"}
-            data = await llm._ask_json(agg, model, REVIEW_SYSTEM,
-                                       f"本集节拍：{json.dumps(beat or {}, ensure_ascii=False)}\n"
-                                       f"代码指标：{json.dumps(facts, ensure_ascii=False)}\n剧本：\n{text[:8000]}", 3500)
+            raw = await llm.ask(agg, model, REVIEW_SYSTEM,
+                                f"本集节拍：{json.dumps(beat or {}, ensure_ascii=False)}\n"
+                                f"代码指标：{json.dumps(facts, ensure_ascii=False)}\n剧本：\n{text[:8000]}", 3500)
+            data = llm._extract_json(raw)
+            if not data:   # 整体解析不了时，至少把 6 项分数抢救出来
+                sc = dict(re.findall(r'"(开场钩子|集末钩子|节拍兑现|情绪密度|人设一致|可拍性)"\s*:\s*(\d+(?:\.\d+)?)', raw or ""))
+                data = {"scores": sc, "issues": [], "summary": ""} if sc else None
             if data and isinstance(data.get("issues"), list):
                 issues += [i for i in data["issues"] if isinstance(i, dict) and i.get("detail")][:12]
                 scores = {}

@@ -1057,6 +1057,10 @@ async def main() -> int:
         from wf import scriptwriter as sw  # noqa: E402
         bad_json = '{"scores":{"开场钩子":8},"issues":[{"severity":"中等","detail":"孔宣说"这股妖气冲天"太长","fix":"拆开",}],"summary":"好"}'
         pj = wfllm._extract_json(bad_json)
+        nl = wfllm._extract_json('{"scores":{"开场钩子":8},"issues":[{"detail":"第一行\n第二行","fix":"改"}],"summary":"好"}')
+        tr = wfllm._extract_json('{"scores":{"开场钩子":8},"issues":[{"detail":"被截断')
+        check("JSON 容错：字符串里的原始换行、输出被截断", nl and nl["issues"][0]["detail"].startswith("第一行") and tr and tr["scores"]["开场钩子"] == 8,
+              json.dumps([nl, tr], ensure_ascii=False))
         check("JSON 容错：字符串里的英文双引号、尾逗号能修好", pj and pj["issues"][0]["detail"].startswith("孔宣说") and pj["scores"]["开场钩子"] == 8,
               json.dumps(pj, ensure_ascii=False))
         mt = sw.metrics("1-1 日 内 营业部 ·约80秒\n人物：孔宣\n△直播间弹幕刷屏骂他。\n孔宣：好。\n", 60, [])

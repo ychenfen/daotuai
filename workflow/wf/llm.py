@@ -75,9 +75,9 @@ def _extract_json(text: str) -> dict | None:
         return None
     t = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
     start, end = t.find("{"), t.rfind("}")
-    if start < 0 or end <= start:
+    if start < 0:
         return None
-    body = t[start:end + 1]
+    body = t[start:end + 1] if end > start else t[start:]
     try:
         return json.loads(body)
     except json.JSONDecodeError:
@@ -85,11 +85,19 @@ def _extract_json(text: str) -> dict | None:
     # 常见坏法（实测 DeepSeek）：字符串里用英文双引号引台词、尾逗号。修一下再试
     fixed = re.sub(r",\s*([}\]])", r"\1", body)
     fixed = _escape_inner_quotes(fixed)
-    try:
-        return json.loads(fixed)
-    except json.JSONDecodeError:
-        log.warning("JSON 解析失败：%s", body[:300].replace("\n", " "))
-        return None
+    for cand in (body, fixed):
+        try:
+            return json.loads(cand, strict=False)      # strict=False：允许字符串里出现原始换行（实测 DeepSeek 会这样）
+        except json.JSONDecodeError:
+            pass
+    # 输出被截断时：补齐括号再试
+    for tail in ("\"}]}", "\"}]", "}]}", "]}", "}"):
+        try:
+            return json.loads(fixed + tail, strict=False)
+        except json.JSONDecodeError:
+            continue
+    log.warning("JSON 解析失败：%s …… %s", body[:200].replace("\n", " "), body[-200:].replace("\n", " "))
+    return None
 
 
 def _escape_inner_quotes(s: str) -> str:
