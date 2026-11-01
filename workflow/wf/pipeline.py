@@ -264,6 +264,7 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, ExtrasMixin):
         kinds = {"character": "characters", "scene": "scenes", "prop": "props", "creature": "creatures"}
         for e in eps:
             e["cover_url"] = media.url_of(e.get("cover_path") or "")
+            e["exports"] = self._exports_of(pid, e["no"])
             e["final_url"] = media.url_of(e["final_path"])
             e["srt_url"] = media.url_of(e["srt_path"])
             e["scenes"] = sum(1 for s in scenes if s["episode_id"] == e["id"])

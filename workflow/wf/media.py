@@ -511,3 +511,86 @@ async def assemble(clips: list[dict], out_path: str, srt_path: str, aspect: str 
                    dub_mode: str = "off", orig_volume: float = 0.35) -> dict:
     return await asyncio.to_thread(_assemble_sync, clips, out_path, srt_path, aspect, burn, bgm, bgm_volume,
                                    dub_mode, orig_volume)
+
+
+# ---------------- 发布导出 ----------------
+
+PRESETS = {
+    "douyin": {"label": "抖音", "long": 1920, "fps": 30, "lufs": -14},
+    "kuaishou": {"label": "快手", "long": 1920, "fps": 30, "lufs": -14},
+    "shipinhao": {"label": "视频号", "long": 1920, "fps": 30, "lufs": -14},
+    "bilibili": {"label": "B 站", "long": 1920, "fps": 30, "lufs": -14},
+    "master": {"label": "母版（原分辨率，只做响度）", "long": 0, "fps": 0, "lufs": -14},
+}
+
+
+def preset_size(aspect: str, long_side: int) -> tuple[int, int]:
+    try:
+        a, b = [float(x) for x in aspect.split(":")]
+    except ValueError:
+        a, b = 9.0, 16.0
+    if a <= b:
+        h = long_side
+        w = int(round(long_side * a / b))
+    else:
+        w = long_side
+        h = int(round(long_side * b / a))
+    return w - w % 2, h - h % 2
+
+
+def _export_sync(src: str, out: str, aspect: str, preset: str, cover: str = "") -> dict:
+    """成片 → 发布文件：放大到平台分辨率（lanczos + 轻锐化）、统一帧率、响度标准化到 -14 LUFS、
+    可选把封面放在第 1 帧前 0.5 秒（平台默认取首帧做封面）。"""
+    ff = ffmpeg_bin()
+    if not ff:
+        raise MediaError("没有 ffmpeg，导出不了")
+    p = PRESETS.get(preset)
+    if not p:
+        raise MediaError(f"没有这个导出预设：{preset}")
+    info = probe(src)
+    sw, sh = info.get("width") or 720, info.get("height") or 1280
+    if p["long"]:
+        w, h = preset_size(aspect, p["long"])
+    else:
+        w, h = sw - sw % 2, sh - sh % 2
+    up = w > sw * 1.05
+    vf = (f"scale={w}:{h}:flags=lanczos:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+          + (",unsharp=5:5:0.5:5:5:0.0" if up else "") + (f",fps={p['fps']}" if p["fps"] else "") + ",format=yuv420p")
+    af = f"loudnorm=I={p['lufs']}:TP=-1.5:LRA=11,aresample=48000"
+    work = tempfile.mkdtemp(prefix="export_")
+    try:
+        body = os.path.join(work, "body.mp4")
+        args = [ff, "-y", "-loglevel", "error", "-i", src]
+        if not info.get("has_audio"):
+            args += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+        else:
+            args += ["-map", "0:v:0", "-map", "0:a:0"]
+        _run(args + ["-vf", vf, "-af", af, "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high",
+                     "-maxrate", "12M", "-bufsize", "24M", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                     "-movflags", "+faststart", body], timeout=3600)
+        final = body
+        if cover and os.path.exists(cover):
+            head = os.path.join(work, "cover.mp4")
+            fps = p["fps"] or 24
+            _run([ff, "-y", "-loglevel", "error", "-loop", "1", "-t", "0.5", "-i", cover,
+                  "-f", "lavfi", "-t", "0.5", "-i", "anullsrc=r=48000:cl=stereo",
+                  "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps={fps},format=yuv420p",
+                  "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high",
+                  "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-shortest", head])
+            joined = os.path.join(work, "joined.mp4")
+            _run([ff, "-y", "-loglevel", "error", "-i", head, "-i", body, "-filter_complex",
+                  "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]", "-map", "[v]", "-map", "[a]",
+                  "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high", "-pix_fmt", "yuv420p",
+                  "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", joined], timeout=3600)
+            final = joined
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        shutil.move(final, out)
+        o = probe(out)
+        return {"path": out, "width": o.get("width"), "height": o.get("height"), "seconds": round(o.get("duration") or 0, 3),
+                "bytes": os.path.getsize(out), "upscaled": up, "cover_first": bool(cover)}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+async def export(src: str, out: str, aspect: str, preset: str, cover: str = "") -> dict:
+    return await asyncio.to_thread(_export_sync, src, out, aspect, preset, cover)

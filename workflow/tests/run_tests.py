@@ -917,6 +917,23 @@ async def main() -> int:
                   "00:00:00:12" in edl.splitlines()[3] and 'start="12/24s"' in fx, edl[:300])
             await j(await c.post(f"/shots/{a['id']}/cut", json={"trim_in": 0, "trim_out": 0, "xfade_s": 0}))
 
+        print("\n[Z3] 发布导出")
+        if HAS_FFMPEG:
+            r = await c.post(f"/projects/{pid}/export", json={"episode_no": 1, "preset": "乱写"})
+            check("未知导出预设 400", r.status_code == 400, "")
+            ex = await j(await c.post(f"/projects/{pid}/export", json={"episode_no": 1, "preset": "douyin"}))
+            check("抖音预设：1080×1920、放大、有声音", ex["width"] == 1080 and ex["height"] == 1920 and ex["upscaled"]
+                  and media.probe(os.path.join(os.environ["WORKFLOW_MEDIA"], ex["url"].split("/media/", 1)[1]))["has_audio"],
+                  json.dumps(ex, ensure_ascii=False)[:200])
+            st = await j(await c.get(f"/projects/{pid}"))
+            ep = st["episodes"][0]
+            ex2 = await j(await c.post(f"/projects/{pid}/export", json={"episode_no": 1, "preset": "master", "cover_first": True}))
+            check("母版 + 封面放首帧：时长多 0.5 秒、分辨率不变", abs(ex2["seconds"] - ep["final_seconds"] - 0.5) < 0.3
+                  and ex2["cover_first"], json.dumps({"ex2": ex2, "final": ep["final_seconds"]})[:200])
+            st = await j(await c.get(f"/projects/{pid}"))
+            check("剧集列出已导出的文件", {x["preset"] for x in st["episodes"][0]["exports"]} >= {"douyin", "master"},
+                  json.dumps(st["episodes"][0]["exports"], ensure_ascii=False))
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

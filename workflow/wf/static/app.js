@@ -897,6 +897,12 @@ async function splitShot(sid, btn) {
   if (r) { const m = btn && btn.closest('.modal'); if (m) m.remove(); }
 }
 
+const EXPORTS = [['douyin', '抖音 1080P'], ['kuaishou', '快手 1080P'], ['shipinhao', '视频号 1080P'], ['bilibili', 'B 站 1080P'], ['master', '母版（原分辨率）']];
+async function exportEp(btn, no) {
+  await act(btn, () => api('POST', `/projects/${S.pid}/export`, {episode_no: no, preset: $('#xp-' + no).value, cover_first: $('#xc-' + no).checked}),
+    r => `已导出 ${r.width}×${r.height}，${r.seconds.toFixed(1)} 秒，${(r.bytes / 1048576).toFixed(1)} MB`);
+}
+
 // ---------------- 剪辑（时间线精修 + 审片） ----------------
 const XF = [[0, '硬切'], [0.3, '叠化 0.3s'], [0.5, '叠化 0.5s'], [1, '叠化 1s']];
 function keptSec(s) { const d = (s.job && s.job.seconds) || s.duration_s; return Math.max(0.5, d - (s.trim_in || 0) - (s.trim_out || 0)); }
@@ -963,7 +969,12 @@ function pgFinal() {
     <div class="row" style="margin-top:8px"><button class="small" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?episode_no=${e.no}'),'已合成')">合成本集</button>
       <button class="small" onclick="S.ep=${e.no};go('videos')">去视频页</button>
       <button class="small" onclick="dubEpisode(this,${e.no})">配音本集</button><button class="small" onclick="qcEpisode(this,${e.no})">质检本集</button>
-      <button class="small" onclick="genCovers(this,${e.no})">${e.cover_url ? '重做封面' : '生成封面'}</button></div></div>`).join('') || '<div class="empty">还没分集</div>'}</div>`;
+      <button class="small" onclick="genCovers(this,${e.no})">${e.cover_url ? '重做封面' : '生成封面'}</button></div>
+    <div class="row small" style="margin-top:8px"><span class="muted">发布导出</span>
+      <select id="xp-${e.no}">${EXPORTS.map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
+      <label><input type="checkbox" id="xc-${e.no}" ${e.cover_url ? '' : 'disabled'}> 封面放首帧</label>
+      <button class="small primary" onclick="exportEp(this,${e.no})" title="放大到平台分辨率、响度统一到 -14 LUFS">导出</button></div>
+    ${e.exports && e.exports.length ? `<div class="small" style="margin-top:4px">${e.exports.map(x => `<a href="${esc(x.url)}" download>${esc(x.label)}（${x.mb} MB）</a>`).join(' · ')}</div>` : ''}</div>`).join('') || '<div class="empty">还没分集</div>'}</div>`;
 }
 
 async function genCovers(btn, epNo) {

@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import logging
+import os
 
-from . import db, llm
+from . import db, llm, media
 from .errors import BudgetExceeded, NotFound, WorkflowError
 from .util import new_id
 
@@ -164,6 +165,40 @@ class ReviewMixin:
             await self.retake_shots(pid, shot_ids=want, auto=True)
         except (BudgetExceeded, WorkflowError) as e:
             self.notify(pid, "warning", "自动重抽没有提交", str(e)[:300])
+
+    # ==================================================================
+    # 发布导出
+    # ==================================================================
+
+    @staticmethod
+    def _exports_of(pid: str, ep_no: int) -> list[dict]:
+        folder = os.path.dirname(media.path_for(pid, "exports", "x"))
+        out = []
+        for key, p in media.PRESETS.items():
+            f = os.path.join(folder, f"EP{ep_no:02d}_{key}.mp4")
+            if os.path.exists(f):
+                out.append({"preset": key, "label": p["label"], "url": media.url_of(f),
+                            "mb": round(os.path.getsize(f) / 1048576, 1)})
+        return out
+
+    async def export_episode(self, pid: str, episode_no: int, preset: str = "douyin", cover_first: bool = False) -> dict:
+        if preset not in media.PRESETS:
+            raise WorkflowError(f"导出预设只能是：{'、'.join(media.PRESETS)}")
+        proj = self.get(pid)
+        ep = next((e for e in proj["episodes"] if e["no"] == episode_no), None)
+        if not ep:
+            raise NotFound(f"第 {episode_no} 集不存在")
+        if not ep["final_path"] or not os.path.exists(ep["final_path"]):
+            await self.assemble(pid, episode_no, allow_partial=True)
+            ep = next(e for e in self.get(pid)["episodes"] if e["no"] == episode_no)
+        cover = ep.get("cover_path") or "" if cover_first else ""
+        if cover_first and not cover:
+            raise WorkflowError("这一集还没有封面，先生成封面再勾选“封面放首帧”")
+        out = media.path_for(pid, "exports", f"EP{episode_no:02d}_{preset}.mp4")
+        r = await media.export(ep["final_path"], out, proj["settings"]["aspect_ratio"], preset, cover)
+        self.notify(pid, "success", f"第 {episode_no} 集已导出（{media.PRESETS[preset]['label']}）",
+                    f"{r['width']}×{r['height']} · {r['seconds']:.1f}s · {r['bytes'] / 1048576:.1f} MB")
+        return {"project": pid, "episode": episode_no, "preset": preset, "url": media.url_of(out), **r}
 
     # ==================================================================
     # 剪辑精修：入点/出点、叠化

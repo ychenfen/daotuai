@@ -585,6 +585,17 @@ def density(pid: str, episode_no: int | None = None):
     return wf().density(pid, episode_no)
 
 
+@app.post("/projects/{pid}/export")
+async def export_episode(pid: str, body: dict = Body(...)):
+    return await wf().export_episode(pid, int(body.get("episode_no") or 1), body.get("preset") or "douyin",
+                                     bool(body.get("cover_first")))
+
+
+@app.get("/api/export-presets")
+def export_presets():
+    return {"items": [{"id": k, **v} for k, v in media.PRESETS.items()]}
+
+
 @app.post("/shots/{sid}/cut")
 def set_cut(sid: str, body: dict = Body(...)):
     return wf().set_cut(sid, body.get("trim_in"), body.get("trim_out"), body.get("xfade_s"))
