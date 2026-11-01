@@ -3,7 +3,9 @@
 """
 import argparse, json, time, urllib.request
 ap = argparse.ArgumentParser(); ap.add_argument("project"); ap.add_argument("codes", nargs="+")
-ap.add_argument("--base", default="http://127.0.0.1:8011"); a = ap.parse_args()
+ap.add_argument("--base", default="http://127.0.0.1:8011")
+ap.add_argument("--requc", action="store_true", help="重抽前先按当前质检规则重新质检一次（约 0.5 分钱/镜）")
+a = ap.parse_args()
 B, P, CODES = a.base, a.project, a.codes
 def req(m, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
@@ -20,6 +22,11 @@ p = proj(); print("项目", p["name"], "花费", p["spend"]["total_rmb"], "剩�
 tg = {s["code"]: s for s in p["shots"] if s["code"] in CODES}
 for c in CODES: show(tg[c], "重抽前")
 ids = [tg[c]["id"] for c in CODES]
+if a.requc:
+    for c in CODES:
+        q = req("POST", f"/jobs/{tg[c]['job']['id']}/qc?force=true")
+        print(f"[按新规则重新质检] {c} {q.get('score')} {q.get('verdict')}")
+        for i in (q.get("issues") or [])[:4]: print("     -", i.get("severity",""), i.get("type",""), i.get("detail","")[:90])
 r = req("POST", f"/projects/{P}/retake", {"shot_ids": ids})
 if "_status" in r: print("重抽失败", r); raise SystemExit(1)
 print("报价", r["quote"]["total_rmb"], "提交", [(x["code"], "v%d" % x["version"]) for x in r["submitted"]], "跳过", r["skipped"])
