@@ -687,6 +687,24 @@ async def chat_send(sid: str, body: dict = Body(...)):
 
 # ---------------- 一键（后台任务） ----------------
 
+@app.post("/projects/{pid}/produce")
+async def produce(pid: str, body: dict = Body(default={})):
+    """多集排队生产（后台任务）：逐集出片 → 质检 → 重抽不合格 → 配音/合成 → 导出，最后出生产报告。"""
+    p = wf().get(pid)
+    if not p["script_text"].strip():
+        raise WorkflowError("先写剧本")
+    from .produce import _seconds_until
+    _seconds_until(body.get("start_at") or "")      # 先校验时间格式
+    task = runner().start(pid, "produce", lambda prog: wf().produce(
+        pid, body.get("episodes"), prog, float(body.get("per_episode_budget_rmb") or 0), bool(body.get("retake", True)),
+        body.get("export_preset") or "", body.get("start_at") or ""))
+    if body.get("wait"):
+        while runner().busy(pid):
+            await asyncio.sleep(0.2)
+        return runner().get(task["id"])
+    return task
+
+
 @app.post("/projects/{pid}/run")
 async def run_all(pid: str, resolution: str | None = None, wait: bool = False):
     """一键成片：分集 → 资产 → 参考图 → 分镜 → 站位图 → (分镜图) → 提示词 → 预算内提交视频 → 等出片 → 合成。

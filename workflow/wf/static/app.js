@@ -934,6 +934,26 @@ async function splitShot(sid, btn) {
 }
 
 const EXPORTS = [['douyin', '抖音 1080P'], ['kuaishou', '快手 1080P'], ['shipinhao', '视频号 1080P'], ['bilibili', 'B 站 1080P'], ['master', '母版（原分辨率）']];
+function produceModal() {
+  const st = S.p.settings;
+  modal(`<h3>批量生产</h3><div class="muted small">逐集：分镜 → 站位图 → 提示词 → 报价 → 出片 → 质检 → 重抽不合格（一轮）→ 配音/合成 → 导出。
+    一集失败不影响下一集；结束后生成生产报告并发通知。已有的分镜、提示词、已出片的镜头会跳过，不会重复花钱。</div>
+    <div class="kv" style="margin-top:10px"><span>集数</span><div>${S.p.episodes.map(e => `<label class="small" style="margin-right:10px"><input type="checkbox" class="pe" value="${e.no}" ${e.final_url ? '' : 'checked'}> 第${e.no}集${e.final_url ? '（已成片）' : ''}</label>`).join('') || '先解析剧本'}</div>
+    <span>单集出片上限（元）</span><input id="pBud" type="number" min="0" step="1" value="0" title="0 = 不限（仍受项目预算约束）">
+    <span>不合格重抽一轮</span><select id="pRe"><option value="1">开</option><option value="0">关</option></select>
+    <span>导出</span><select id="pEx"><option value="">不导出</option>${EXPORTS.map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
+    <span>开始时间</span><input id="pAt" placeholder="留空 = 立即；例如 01:30（服务器时间）"></div>
+    <div class="small muted" style="margin-top:8px">出片：${esc(st.video_model)} · ${esc(st.resolution)}；配音：${esc(DUB[st.dub_mode] || st.dub_mode)}；项目剩余预算 ${rmb(S.p.spend.remaining_rmb)}</div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end"><button onclick="closeModal(this)">取消</button><button class="primary" onclick="startProduce(this)">开始</button></div>`, true);
+}
+async function startProduce(btn) {
+  const eps = [...document.querySelectorAll('.pe:checked')].map(x => +x.value);
+  if (!eps.length) return toast('至少选一集', true);
+  if (!confirmCost([S.p.settings.video_model, S.p.settings.image_model, S.p.settings.text_model], `批量生产 ${eps.length} 集`)) return;
+  const r = await act(btn, () => api('POST', `/projects/${S.pid}/produce`, {episodes: eps, per_episode_budget_rmb: +$('#pBud').value,
+    retake: $('#pRe').value === '1', export_preset: $('#pEx').value, start_at: $('#pAt').value.trim()}), '已开始，进度在右上角');
+  if (r) closeModal(btn);
+}
 async function exportEp(btn, no) {
   await act(btn, () => api('POST', `/projects/${S.pid}/export`, {episode_no: no, preset: $('#xp-' + no).value, cover_first: $('#xc-' + no).checked}),
     r => `已导出 ${r.width}×${r.height}，${r.seconds.toFixed(1)} 秒，${(r.bytes / 1048576).toFixed(1)} MB`);
@@ -993,7 +1013,9 @@ function pgFinal() {
     <button onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?allow_partial=true'),'已合成（跳过缺的镜头）')">跳过缺镜头合成</button>
     <a href="${BASE}/projects/${S.pid}/download?what=finals"><button>下载全部成片</button></a>
     <a href="${BASE}/projects/${S.pid}/edit-package"><button title="编号片段 + 字幕 + EDL/FCPXML">导出剪辑工程</button></a>
-    <button onclick="genCovers(this,null)">生成全部封面</button></div>
+    <button onclick="genCovers(this,null)">生成全部封面</button><button class="primary" onclick="produceModal()" title="逐集出片→质检→重抽不合格→配音合成→导出，最后出报告">批量生产…</button></div>
+    ${S.p.task && S.p.task.kind === 'produce' ? `<div class="small" style="margin-top:6px">最近一次批量生产：${badge(S.p.task.status)} ${(S.p.task.steps || []).filter(x => x.status === 'succeeded').length} 步完成
+      ${S.p.task.result && S.p.task.result.report_url ? `· <a href="${esc(S.p.task.result.report_url)}" target="_blank">看生产报告</a>` : ''}${S.p.task.error ? `<span class="err"> ${esc(S.p.task.error)}</span>` : ''}</div>` : ''}
     <div class="row" style="margin-top:8px"><label class="small">配音<select onchange="act(null,()=>api('PATCH','/projects/${S.pid}/settings',{dub_mode:this.value}),'已保存')">${Object.entries(DUB).map(([k, v]) => `<option value="${k}" ${st.dub_mode === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
       <span class="small muted">${st.dub_mode === 'off' ? '用视频模型自带的台词声音' : `合成时自动给缺配音的镜头补配音（旁白：${esc(voiceName(st.narrator_voice))}）`}</span>
       <span class="spacer"></span><button class="small" onclick="go('assets')">设置角色音色</button></div>

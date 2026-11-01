@@ -18,6 +18,7 @@ from .extras import ExtrasMixin
 from .util import new_id, short_hash
 from .qc_dub import QcDubMixin
 from .ops import OpsMixin
+from .produce import ProduceMixin
 from .review import ReviewMixin
 from .video_ops import ACTIVE_JOB, VideoMixin
 
@@ -76,7 +77,7 @@ _id = new_id
 _h = short_hash
 
 
-class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, ExtrasMixin):
+class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, ProduceMixin, ExtrasMixin):
     def __init__(self, agg: Agg, auto_topup_rmb: float = 0.0):
         self.agg = agg
         self.auto_topup_rmb = auto_topup_rmb

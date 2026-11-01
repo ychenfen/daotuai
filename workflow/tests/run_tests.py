@@ -990,6 +990,31 @@ async def main() -> int:
         ok = await c.post(f"/forms/{fid}/select?version=1")
         check("解锁后可以换版本", ok.status_code == 200, ok.text[:100])
 
+        print("\n[Z7] 多集排队生产 + 报告")
+        p2 = await j(await c.post("/projects", json={"name": "批量生产", "style": "3D", "settings": {
+            "budget_rmb": 500, "gen_asset_images": False, "gen_blocking": False, "dub_mode": "mix"}}))
+        pid2 = p2["id"]
+        await j(await c.post(f"/projects/{pid2}/script", json={"text": SCRIPT}))
+        r = await c.post(f"/projects/{pid2}/produce", json={"start_at": "25:99"})
+        check("开始时间格式不对 400", r.status_code == 400, r.text[:100])
+        t = await j(await c.post(f"/projects/{pid2}/produce", json={"episodes": [1, 2], "per_episode_budget_rmb": 0,
+                                                                    "retake": True, "export_preset": "douyin" if HAS_FFMPEG else "",
+                                                                    "wait": True}))
+        rep = t["result"]
+        check("批量生产：逐集跑完、每集有花费和质检", t["status"] == "succeeded" and len(rep["episodes"]) == 2
+              and all(e["status"] in ("done", "partial") and e["spent_rmb"] > 0 and e.get("qc") for e in rep["episodes"]),
+              json.dumps(rep, ensure_ascii=False)[:400])
+        if HAS_FFMPEG:
+            check("每集合成并导出抖音版", all(e.get("final_url") and e.get("export_url") for e in rep["episodes"]),
+                  json.dumps(rep["episodes"], ensure_ascii=False)[:300])
+        rp = await c.get(rep["report_url"])
+        check("生产报告（Markdown）可下载", rp.status_code == 200 and "| 第1集 |" in rp.text and "| 第2集 |" in rp.text, rp.text[:200])
+        t = await j(await c.post(f"/projects/{pid2}/produce", json={"episodes": [1], "per_episode_budget_rmb": 0.01,
+                                                                    "wait": True}))
+        e1 = t["result"]["episodes"][0]
+        check("单集上限：超出就跳过这一集并写明原因", e1["status"] in ("failed", "done") and
+              (e1["status"] == "done" or "单集上限" in "".join(e1["errors"])), json.dumps(e1, ensure_ascii=False)[:200])
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:
