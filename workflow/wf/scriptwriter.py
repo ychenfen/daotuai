@@ -24,6 +24,19 @@ from .util import short_hash
 log = logging.getLogger("workflow.script")
 
 GENRES = ["都市逆袭", "穿越", "重生复仇", "甜宠", "战神", "悬疑", "古风权谋", "玄幻修仙", "家庭伦理", "喜剧"]
+# 类型节奏骨架：做节拍表时的默认参考（借鉴 MYStudio / 漫剧写作技能的类型骨架，按短剧常见套路自写）
+SKELETONS = {
+    "都市逆袭": "开局被羞辱/失去一切 → 金手指或隐藏身份显露 → 小范围打脸 → 更强对手出现 → 身份半揭晓的大打脸 → 新危机",
+    "穿越": "格格不入的反差笑点 → 金手指被发现 → 用古代/异界见识小胜 → 被质疑围攻 → 大胜立威 → 暗线身世/归途悬念",
+    "重生复仇": "前世惨死闪回 → 重生觉醒、改写第一个关键选择 → 布局 → 逐个打脸仇人 → 发现更大的幕后真相",
+    "甜宠": "误会式相遇 → 被迫绑定（契约/同住）→ 心动细节 → 第三者或身份阻碍 → 虐心分离 → 高光表白/护妻名场面",
+    "战神": "隐忍受辱（入赘/落魄）→ 底线被触碰 → 身份一角露出 → 打脸权贵 → 更大势力登场 → 身份全揭的碾压",
+    "悬疑": "开场命案/怪事 → 关键线索 → 误导与嫌疑人反转 → 主角陷入危险 → 真相反转 → 新谜团",
+    "古风权谋": "受冤或失势 → 结盟 → 宫斗/朝堂交锋小胜 → 背叛 → 反杀 → 更高位的对手",
+    "玄幻修仙": "废柴被欺 → 奇遇得传承 → 越级小胜 → 宗门大比/秘境 → 身世之谜 → 更大世界",
+    "家庭伦理": "家庭矛盾爆发 → 委屈积压 → 外力介入 → 真相/身份揭开 → 和解或决裂的高潮",
+    "喜剧": "反差设定 → 连环误会 → 越描越黑 → 关键时刻歪打正着 → 温情落点",
+}
 HOOK_TYPES = ("主角下一步行动", "反派反击", "第三方态度")
 MODES = ("压", "放")
 SPEECH_CPS = 4.0          # 审核按每秒 4 字算台词（比分镜的 4.5 更保守，留表演空间）
@@ -227,11 +240,19 @@ def grade(issues: list[dict]) -> str:
 # 模型调用
 # ======================================================================
 
+ADAPT_RULE = """
+素材是长篇（小说/大纲）时，再加一个字段做改编追踪（借鉴 MYStudio），逐段记录原文的去向，防止漏掉关键情节：
+"adaptation":[{"source":"原文段落要点（20字内）","use":"采用|压缩|删除","ep":用在第几集（删除写0）,"reason":"一句话理由"}]"""
+
+
 async def make_bible(agg, model: str, idea: str, episodes: int, genre: str, engine: str | None) -> tuple[dict, str]:
     if llm.use_model(engine):
         try:
-            data = await llm._ask_json(agg, model, BIBLE_SYSTEM,
-                                       f"类型：{genre or '按素材判断'}\n集数：{episodes}\n素材：\n{idea[:12000]}", 6000)
+            sk = SKELETONS.get(genre)
+            data = await llm._ask_json(agg, model, BIBLE_SYSTEM + (ADAPT_RULE if len(idea) > 1500 else ""),
+                                       f"类型：{genre or '按素材判断'}\n"
+                                       + (f"类型节奏骨架（参考，可按素材调整）：{sk}\n" if sk else "")
+                                       + f"集数：{episodes}\n素材：\n{idea[:12000]}", 7000)
             if data and data.get("characters") and len(data.get("beats") or []) >= max(1, episodes - 1):
                 return normalize_bible(data, episodes), "real"
             log.warning("故事圣经输出不完整，改用本地模板")
@@ -263,7 +284,11 @@ def normalize_bible(b: dict, episodes: int) -> dict:
     props = [p for p in (b.get("props") or []) if isinstance(p, dict) and p.get("name")][:12]
     for p in props:
         p["avoid"] = [str(w) for w in (p.get("avoid") or []) if w and str(w) not in p["name"]][:4]
-    return {"title": str(b.get("title") or "")[:30], "logline": str(b.get("logline") or "")[:200],
+    adapt = [a for a in (b.get("adaptation") or []) if isinstance(a, dict) and a.get("source")][:60]
+    for a in adapt:
+        a["use"] = a.get("use") if a.get("use") in ("采用", "压缩", "删除") else "采用"
+    return {"title": str(b.get("title") or "")[:30], "logline": str(b.get("logline") or "")[:200], "adaptation": adapt,
+            "seconds_per_ep": int(b.get("seconds_per_ep") or 0) or 60,
             "genre": str(b.get("genre") or ""), "tone": str(b.get("tone") or ""),
             "characters": [c for c in (b.get("characters") or []) if isinstance(c, dict) and c.get("name")][:8],
             "props": props, "beats": out_beats}
@@ -429,26 +454,9 @@ class ScriptMixin:
             b, b_src = normalize_bible(bible, episodes), "given"
         else:
             b, b_src = await make_bible(self.agg, model, idea, episodes, genre, engine)
-        scenes = max(2, min(6, round(seconds_per_ep / 25)))
-
-        async def one(beat):
-            prev = b["beats"][beat["ep"] - 2]["hook_end"] if beat["ep"] > 1 else ""
-            text, src = await write_episode(self.agg, model, b, beat, seconds_per_ep, scenes, prev, engine)
-            rounds, history = 0, []
-            rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"]), engine)
-            history.append(rv["grade"])
-            while auto_fix and rv["grade"] in ("C", "D") and rounds < 2:
-                if rv["grade"] == "D" and rounds == 0:
-                    text, src = await write_episode(self.agg, model, b, beat, seconds_per_ep, scenes, prev, engine)
-                else:
-                    text, _ = await revise_episode(self.agg, model, text, rv, b, beat, engine)
-                rounds += 1
-                rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"]), engine)
-                history.append(rv["grade"])
-            rv["history"] = history
-            return beat["ep"], text, src, rv
-
-        results = await self.gather_limited(one(bt) for bt in b["beats"])
+        b["seconds_per_ep"] = seconds_per_ep
+        results = await self.gather_limited(
+            self._write_one(b, bt, seconds_per_ep, model, engine, auto_fix) for bt in b["beats"])
         texts, reviews, sources = [], {}, set()
         for r in sorted([r for r in results if not isinstance(r, Exception)], key=lambda x: x[0]):
             n, text, src, rv = r
@@ -471,6 +479,61 @@ class ScriptMixin:
         self.notify(pid, "success" if set(grades) <= {"A", "B"} else "warning",
                     f"剧本完成：{len(texts)} 集，评级 {grades}", f"来源：{source}；卡点集：{paywall_episodes(episodes)}")
         out.update(generated_source=source, bible=b, reviews=reviews, errors=errs)
+        return out
+
+    async def _write_one(self, b: dict, beat: dict, seconds_per_ep: int, model: str, engine: str,
+                         auto_fix: bool = True) -> tuple[int, str, str, dict]:
+        """写一集 → 体检 → C 档定向改写（≤2 轮）/ D 档先重写一次。"""
+        scenes = max(2, min(6, round(seconds_per_ep / 25)))
+        prev = b["beats"][beat["ep"] - 2]["hook_end"] if beat["ep"] > 1 else ""
+        text, src = await write_episode(self.agg, model, b, beat, seconds_per_ep, scenes, prev, engine)
+        rounds, history = 0, []
+        rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"]), engine)
+        history.append(rv["grade"])
+        while auto_fix and rv["grade"] in ("C", "D") and rounds < 2:
+            if rv["grade"] == "D" and rounds == 0:
+                text, src = await write_episode(self.agg, model, b, beat, seconds_per_ep, scenes, prev, engine)
+            else:
+                text, _ = await revise_episode(self.agg, model, text, rv, b, beat, engine)
+            rounds += 1
+            rv = await review_episode(self.agg, model, text, beat, metrics(text, seconds_per_ep, b["props"]), engine)
+            history.append(rv["grade"])
+        rv["history"] = history
+        return beat["ep"], text, src, rv
+
+    async def rewrite_episodes(self, pid: str, episodes: list[int], auto_fix: bool = True) -> dict:
+        """改了节拍表后，只重写受影响的几集（借鉴 Dramatron：每层可人工改，改完只往下重算受影响部分）。"""
+        b = self.bible(pid)
+        if not b.get("beats"):
+            raise WorkflowError("还没有故事圣经，先用“一键剧本”生成，或在故事圣经里填好分集节拍")
+        st = self.settings(pid)
+        eps = sorted({int(n) for n in episodes or []})
+        beats = {x["ep"]: x for x in b["beats"]}
+        bad = [n for n in eps if n not in beats]
+        if not eps or bad:
+            raise WorkflowError(f"要重写的集不在节拍表里：{bad or '没选集'}")
+        p = self._project_row(pid)
+        blocks = self.split_episodes(p["script_text"]) if p["script_text"].strip() else []
+        llm.current_project.set(pid)
+        sec = int(b.get("seconds_per_ep") or 60)
+        results = await self.gather_limited(self._write_one(b, beats[n], sec, st["text_model"], st["engine"], auto_fix)
+                                            for n in eps)
+        errs = [str(r) for r in results if isinstance(r, Exception)]
+        done = [r for r in results if not isinstance(r, Exception)]
+        if not done:
+            raise WorkflowError("重写失败：" + "；".join(errs[:2]))
+        self._snapshot_script(pid, f"按节拍重写第{'、'.join(map(str, eps))}集前")
+        texts = {i + 1: f"{t}\n{bd}" for i, (t, bd) in enumerate(blocks)}
+        reviews = db.load(p["script_review_json"] or "", {}) or {}
+        for n, text, _, rv in done:
+            texts[n] = text.strip()
+            reviews[str(n)] = rv
+        script = "\n\n".join(texts[k] for k in sorted(texts))
+        with db.tx() as c:
+            c.execute("UPDATE projects SET script_review_json=? WHERE id=?", (db.dump(reviews), pid))
+        out = self.set_script(pid, script)
+        out["rewritten"] = {str(n): rv["grade"] for n, _, _, rv in done}
+        out["errors"] = errs
         return out
 
     # ---------------- 体检 / 改写 现有剧本 ----------------

@@ -266,7 +266,10 @@ function bibleCard() {
     ${b.props && b.props.length ? `<div class="small" style="margin-top:4px"><b>关键道具</b> ${b.props.map(p => `<span class="chip" title="${esc(p.look || '')}">${esc(p.name)}${(p.avoid || []).length ? `<span class="muted">（别写成 ${esc(p.avoid.join('/'))}）</span>` : ''}</span>`).join('')}</div>` : ''}
     ${b.beats ? `<table class="small" style="width:100%;margin-top:8px"><tr class="muted"><td>集</td><td>压/放</td><td>开场钩子</td><td>反转</td><td>爽点</td><td>集末钩子</td><td>体检</td></tr>
       ${b.beats.map(x => { const r = rv[x.ep]; return `<tr><td>${x.ep}${x.paywall ? ' <span title="付费卡点集">⭐</span>' : ''}</td><td>${esc(x.mode)}</td><td>${esc(x.hook_open)}</td><td>${esc(x.twist)}</td><td>${esc(x.payoff)}</td>
-        <td>${esc(x.hook_end)} <span class="muted">（${esc(x.hook_type)}）</span></td><td>${r ? `<span class="badge ${GRADE[r.grade]}" style="cursor:pointer" onclick="reviewDetail(${x.ep})">${r.grade}</span>` : '-'}</td></tr>`; }).join('')}</table>`
+        <td>${esc(x.hook_end)} <span class="muted">（${esc(x.hook_type)}）</span></td><td>${r ? `<span class="badge ${GRADE[r.grade]}" style="cursor:pointer" onclick="reviewDetail(${x.ep})">${r.grade}</span>` : '-'}
+          <a href="javascript:void 0" class="small" onclick="beatModal(${x.ep})">改</a></td></tr>`; }).join('')}</table>
+      ${(b.adaptation || []).length ? `<details style="margin-top:8px"><summary class="small">改编追踪（${b.adaptation.length} 段：采用 ${b.adaptation.filter(a => a.use === '采用').length} · 压缩 ${b.adaptation.filter(a => a.use === '压缩').length} · 删除 ${b.adaptation.filter(a => a.use === '删除').length}）</summary>
+        <table class="small" style="width:100%">${b.adaptation.map(a => `<tr><td>${esc(a.source)}</td><td><span class="badge ${a.use === '删除' ? 'warn' : ''}">${esc(a.use)}</span></td><td>${a.ep ? '第' + a.ep + '集' : '-'}</td><td class="muted">${esc(a.reason || '')}</td></tr>`).join('')}</table></details>` : ''}`
       : `<div class="row small" style="margin-top:8px">${grades.map(k => `<span class="badge ${GRADE[rv[k].grade]}" style="cursor:pointer" onclick="reviewDetail(${k})">第${k}集 ${rv[k].grade}</span>`).join('')}</div>`}</div>`;
 }
 function reviewDetail(n) {
@@ -302,6 +305,29 @@ async function restoreScript(id, btn) {
   if (!confirm('用这个版本替换当前剧本？（当前稿会先存一份）')) return;
   const r = await act(btn, () => api('POST', `/projects/${S.pid}/script/versions/${id}/restore`), '已恢复');
   if (r) { const m = btn.closest('.modal'); if (m) m.remove(); render(); }
+}
+function beatModal(ep) {
+  const x = (S.p.bible.beats || []).find(b => b.ep === ep); if (!x) return;
+  const f = (k, label) => `<span>${label}</span><input data-b="${k}" value="${esc(x[k] || '')}">`;
+  modal(`<h3>第${ep}集节拍${x.paywall ? ' ⭐付费卡点集' : ''}</h3>
+    <div class="kv"><span>压 / 放</span><select data-b="mode">${['压', '放'].map(m => `<option ${x.mode === m ? 'selected' : ''}>${m}</option>`).join('')}</select>
+      ${f('hook_open', '开场钩子（前 3 秒）')}${f('twist', '中段反转')}${f('payoff', '爽点')}${f('hook_end', '集末钩子')}
+      <span>钩子类型</span><select data-b="hook_type">${['主角下一步行动', '反派反击', '第三方态度'].map(m => `<option ${x.hook_type === m ? 'selected' : ''}>${m}</option>`).join('')}</select>
+      <span>出场人物</span><input data-b="characters" value="${esc((x.characters || []).join('、'))}">
+      <span>关键道具</span><input data-b="props" value="${esc((x.props || []).join('、'))}"></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end"><button onclick="closeModal(this)">取消</button>
+      <button onclick="saveBeat(${ep},this,false)">只保存节拍</button><button class="primary" onclick="saveBeat(${ep},this,true)">保存并重写本集</button></div>`, true);
+}
+async function saveBeat(ep, btn, rewrite) {
+  const b = JSON.parse(JSON.stringify(S.p.bible)), x = b.beats.find(z => z.ep === ep);
+  btn.closest('.card').querySelectorAll('[data-b]').forEach(el => {
+    const k = el.dataset.b; x[k] = ['characters', 'props'].includes(k) ? el.value.split(/[、,，\s]+/).filter(Boolean) : el.value;
+  });
+  if (rewrite && !confirmCost([S.p.settings.text_model], `重写第${ep}集`)) return;
+  const r = await act(btn, async () => { await api('PUT', `/projects/${S.pid}/bible`, {bible: b});
+    return rewrite ? api('POST', `/projects/${S.pid}/script/rewrite`, {episodes: [ep]}) : {}; },
+    r => rewrite ? `第${ep}集已按新节拍重写：评级 ${(r.rewritten || {})[ep] || '-'}（原稿已存版本）` : '节拍已保存');
+  if (r) { const m = btn.closest('.modal'); if (m) m.remove(); }
 }
 async function bibleJson() {
   const r = await api('GET', `/projects/${S.pid}/bible`);

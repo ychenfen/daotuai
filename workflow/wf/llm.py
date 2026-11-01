@@ -35,6 +35,8 @@ def record_charge(res: dict) -> None:
             log.exception("记录文本花费失败")
 
 SIZES = ["史诗大远景", "全景", "中景", "近景", "特写"]
+SUB_SIZES = ["中景", "近景", "全景", "特写"]          # 本地分镜的子镜头景别轮换（借鉴火宝：一卡 2~4 个子镜头、景别有变化）
+SUB_SIZE_SET = {"远景", "全景", "中景", "近景", "特写", "大远景", "中近景"}
 ANGLES = ["俯拍", "平视", "仰拍", "低机位", "过肩"]
 MOVES = ["缓推", "固定机位", "横移跟随", "手持跟拍", "缓拉", "升降"]
 POSITIONS = ["画面中央", "画面左侧", "画面右侧", "后景", "前景"]
@@ -324,7 +326,7 @@ STORYBOARD_SYSTEM = """你是短剧分镜师。把一集剧本按场次拆成"�
 卡内按时间段写画面。只输出 JSON，不要解释：
 {"shots":[{"scene_code":"1-1","duration":15,"size":"景别（可多个，用顿号）","angle":"角度","movement":"运镜",
 "characters":["本镜出场角色（用资产表里的名字；有形态时写成 名字（形态））"],
-"segments":[{"start":0,"end":3,"picture":"这一段的画面，含 <音效>"}],
+"segments":[{"start":0,"end":3,"shot":"子镜头景别：远景|全景|中景|近景|特写","picture":"这一段的画面，含 <音效>"}],
 "performance":"表演要点：人物情绪、动作节奏、对手戏关系","blocking":"站位：人物在画面中的位置与朝向",
 "dialogue":"角色：台词（多句换行），没有就空字符串","sfx":"音效","transition":"与下一镜的衔接",
 "overlay":"剧本里【贴字】行的文字（屏幕/短信上的字，后期贴），没有就空字符串"}]}
@@ -336,6 +338,7 @@ STORYBOARD_SYSTEM = """你是短剧分镜师。把一集剧本按场次拆成"�
 5. 每个时间段不短于 2 秒、只写一个看得见的主动作（写清起始姿态→动作→结束姿态）；5 秒的卡最多 2 段，
    一张卡最多两人对话、同框看清脸的人不超过 2 个。动作多就拆成多张卡——视频模型在一张卡里只能可靠地演出一两个动作；
 6. 剧本里的【贴字】文字放进 overlay，不写进 segments 画面；画面只写“电脑屏幕上红绿K线跳动”这类看得见的描述；
+8. 一张卡 2~4 个子镜头（segments），景别要有变化（例如 中景→近景→特写），说台词的段用近景或特写，不跨场；
 7. 每段画面都写清谁在画面哪里（如“孔宣在画面左侧，沈岚在右后方”），关键道具每次都写全名，宁可重复也别换叫法。"""
 
 
@@ -358,16 +361,21 @@ def speech_seconds(dialogue: str) -> float:
     return round(total + 1.0, 1) if lines else 0.0
 
 
-_SEG_RE = re.compile(r"【(\d+(?:\.\d+)?)\s*[-~～—]\s*(\d+(?:\.\d+)?)\s*秒】")
+_SEG_RE = re.compile(r"【(\d+(?:\.\d+)?)\s*[-~～—]\s*(\d+(?:\.\d+)?)\s*秒(?:[·・\s]\s*([^】]{1,6}))?】")
 
 
 def segments(picture: str) -> list[tuple[float, float, str]]:
     """画面时间轴 → [(起, 止, 这一段的文字)]。"""
+    return [(a, b, t) for a, b, _, t in segments_full(picture)]
+
+
+def segments_full(picture: str) -> list[tuple[float, float, str, str]]:
+    """画面时间轴 → [(起, 止, 子镜头景别, 这一段的文字)]；“【0-3秒·近景】”里的景别没写就是空串。"""
     ms = list(_SEG_RE.finditer(picture or ""))
     out = []
     for k, m in enumerate(ms):
         end = ms[k + 1].start() if k + 1 < len(ms) else len(picture)
-        out.append((float(m.group(1)), float(m.group(2)), picture[m.end():end].strip()))
+        out.append((float(m.group(1)), float(m.group(2)), (m.group(3) or "").strip(), picture[m.end():end].strip()))
     return out
 
 
@@ -417,9 +425,10 @@ def mock_storyboard(scenes: list[dict], style: str, char_names: list[str], dur_m
         if total > dur_max:
             scale = dur_max / total
         t, picture = 0.0, []
-        for text, sec in cur["segs"]:
+        for k, (text, sec) in enumerate(cur["segs"]):
             d = sec * scale
-            picture.append(f"【{t:g}-{t + d:g}秒】{text}")
+            size = "近景" if "说：" in text else SUB_SIZES[(len(shots) + k) % len(SUB_SIZES)]
+            picture.append(f"【{t:g}-{t + d:g}秒·{size}】{text}")
             t = round(t + d, 2)
         dur = _clamp(round(t), dur_min, dur_max, target)
         chars = [n for n in char_names if any(n in x[0] for x in cur["segs"]) or n in cur["speakers"]]
@@ -482,8 +491,9 @@ def _normalize_shots(raw: list, max_shots: int, char_names: list[str], dur_min: 
             continue
         segs = [x for x in (s.get("segments") or []) if isinstance(x, dict) and x.get("picture")]
         if segs:
-            picture = "".join(f"【{_clamp(x.get('start'), 0, 60, 0.0):g}-{_clamp(x.get('end'), 0, 60, 0.0):g}秒】"
-                              f"{str(x['picture']).strip()}" for x in segs)
+            picture = "".join(f"【{_clamp(x.get('start'), 0, 60, 0.0):g}-{_clamp(x.get('end'), 0, 60, 0.0):g}秒"
+                              + (f"·{str(x['shot']).strip()[:4]}" if str(x.get("shot") or "").strip() in SUB_SIZE_SET else "")
+                              + f"】{str(x['picture']).strip()}" for x in segs)
         else:
             picture = str(s.get("picture") or "")
         chars = [str(x).strip() for x in (s.get("characters") or []) if str(x).strip()]
@@ -660,11 +670,12 @@ def edit_image_prompt(kind: str, name: str, instruction: str, style: str) -> str
     return f"在参考图基础上修改{name}：{instruction}。保持{style}风格、人物身份与其余细节不变，无文字无水印。"
 
 
-def blocking_prompt(scene: dict, chars: list[str], style: str, aspect: str) -> str:
+def blocking_prompt(scene: dict, chars: list[str], style: str, aspect: str, props: list[str] | None = None) -> str:
     who = "、".join(chars) if chars else "无人物"
     note = scene.get("blocking_note") or ""
+    prop = f"关键道具（位置清楚、外观与参考一致）：{'、'.join(props)}。" if props else ""
     return (f"{style}风格场景站位图，{aspect}，场景：{scene.get('location') or scene.get('heading')}，"
-            f"{scene.get('time_of_day') or ''}。人物到场后的位置关系：{who}。{note}"
+            f"{scene.get('time_of_day') or ''}。人物到场后的位置关系：{who}。{prop}{note}"
             f"全景机位，人物全身可见、互不遮挡、比例正确，用于后续镜头的空间参考；无文字无水印。")
 
 

@@ -475,7 +475,12 @@ class AssetsMixin:
                 a = by_name.get(name)
                 if a and (a["local_path"] or a["image_url"]) and a["kind"] != "audio":
                     refs.append(self._ref_url(a["local_path"], a["image_url"]))
-            prompt = llm.blocking_prompt(sc, chars, proj["style"], "16:9")
+            props = [a["name"] for a in proj["assets"] if a["kind"] == "prop" and a["name"] in sc["text"]][:3]
+            for name in props:     # 关键道具也挂参考图，站位图里位置和样子先定下来（借鉴 ViMax“写清谁/什么在哪”）
+                a = by_name.get(name)
+                if a and (a["local_path"] or a["image_url"]) and len(refs) < 6:
+                    refs.append(self._ref_url(a["local_path"], a["image_url"]))
+            prompt = llm.blocking_prompt(sc, chars, proj["style"], "16:9", props)
             res = await self.agg.image(st["image_model"], prompt, size=image_size("16:9", st["image_resolution"]),
                                        refs=refs or None, idem=f"blocking:{sc['id']}:{short_hash(prompt, len(refs))}")
             url = (res.get("data") or [{}])[0].get("url") or ""

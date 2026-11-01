@@ -12,6 +12,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1137,6 +1138,46 @@ async def main() -> int:
             check("合成：贴字作为字幕出现在镜头开头", "买入成功" in srt, srt[:200] + json.dumps(
                 [(s["code"], s.get("overlay"), (s["job"] or {}).get("status")) for s in st2["shots"] if s["episode_no"] == 1], ensure_ascii=False)
                 + json.dumps(a, ensure_ascii=False)[:300])
+        await W.drain_background()
+
+        print("\n[S2] 借鉴第一批：子镜头 / 提示词告警 / 逐行贴字 / 按节拍重写 / 站位图道具")
+        sf = wfllm.segments_full("【0-3秒·中景】甲转身【3-6秒·特写】乙拔剑【6-8秒】收")
+        check("子镜头景别可解析（没写景别也兼容）", [x[2] for x in sf] == ["中景", "特写", ""] and len(wfllm.segments("【0-3秒·中景】a【3-5秒】b")) == 2, str(sf))
+        st2 = await j(await c.get(f"/projects/{sp}"))
+        pics = [s["picture"] for s in st2["shots"] if s["episode_no"] == 1]
+        check("本地分镜：每段带子镜头景别", pics and all(re.search(r"秒·(中景|近景|全景|特写)】", p_) for p_ in pics), pics[0][:80])
+        assets2 = st2["assets"]
+        names2 = [a["name"] for a in assets2 if a["kind"] == "character"]
+        shot_x = {"characters": names2[:1], "picture": "", "overlay": ""}
+        w2 = W._prompt_warnings("画面：" + "、".join("@" + n for n in names2[:3]) + " 站在人群中，墙上横幅写着口号，镜子里倒影晃动。"
+                                + wfllm.SUFFIX, shot_x, {}, assets2)
+        check("提示词告警：引用本镜头没有的人物、同框超 2 人、易翻车写法（人群/横幅/镜子）",
+              any("没有出场" in w for w in w2) and (len(names2) < 3 or any("同框" in w for w in w2))
+              and sum("易翻车" in w for w in w2) >= 3, json.dumps(w2, ensure_ascii=False))
+        w3 = W._prompt_warnings("画面：@" + names2[0] + " 站立。画面不出现任何文字、字幕、水印。" + wfllm.SUFFIX, shot_x, {}, assets2)
+        check("“不出现文字”这类禁止句不算易翻车", not any("易翻车" in w for w in w3), json.dumps(w3, ensure_ascii=False))
+        if HAS_FFMPEG:
+            sh = next(s for s in st2["shots"] if s["episode_no"] == 1)
+            await c.patch(f"/shots/{sh['id']}", json={"expected_rev": sh["rev"], "fields": {"overlay": "买入成功\n余额：3200\n收益率 +27%"}})
+            await j(await c.post(f"/projects/{sp}/assemble?episode_no=1&allow_partial=true"))
+            st2 = await j(await c.get(f"/projects/{sp}"))
+            srt = open(st2["episodes"][0]["srt_path"], encoding="utf-8").read()
+            check("贴字逐行点亮：先 1 行、再 2 行、最后 3 行", "买入成功\n余额：3200\n收益率 +27%" in srt and
+                  srt.index("买入成功\n余额：3200\n收益率") > srt.index("买入成功\n余额：3200"), srt[:300])
+        old = (await j(await c.get(f"/projects/{sp}")))["script_text"]
+        bb2 = (await j(await c.get(f"/projects/{sp}/bible")))["bible"]
+        bb2["beats"][1]["hook_open"] = "孔宣一掌拍碎了交易所的玻璃门"
+        await j(await c.put(f"/projects/{sp}/bible", json={"bible": bb2}))
+        rw = await j(await c.post(f"/projects/{sp}/script/rewrite", json={"episodes": [2]}))
+        new_t = rw["script_text"]
+        check("改节拍后只重写受影响的集（第 2 集变、第 1 集不变）", "孔宣一掌拍碎了交易所的玻璃门" in new_t
+              and new_t.split("第2集")[0].strip() == old.split("第2集")[0].strip() and rw["rewritten"].get("2") in list("ABCD"),
+              json.dumps(rw.get("rewritten")))
+        r = await c.post(f"/projects/{sp}/script/rewrite", json={"episodes": [99]})
+        check("重写不存在的集 400", r.status_code == 400, r.text[:100])
+        bp = wfllm.blocking_prompt({"location": "营业部"}, ["孔宣"], "真人", "16:9", ["营业部台式电脑"])
+        check("站位图提示词带关键道具", "营业部台式电脑" in bp, bp[:120])
+        check("类型节奏骨架齐全", all(g in sw.SKELETONS for g in sw.GENRES), "")
         await W.drain_background()
 
         print("\n[U] 聚合层账本")

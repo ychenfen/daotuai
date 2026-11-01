@@ -308,6 +308,11 @@ async def revise_script(pid: str, body: dict = Body(...)):
     return await wf().revise_script(pid, int(body.get("episode_no") or 1))
 
 
+@app.post("/projects/{pid}/script/rewrite")
+async def rewrite_episodes(pid: str, body: dict = Body(...)):
+    return await wf().rewrite_episodes(pid, body.get("episodes") or [], bool(body.get("auto_fix", True)))
+
+
 @app.get("/projects/{pid}/script/versions")
 def script_versions(pid: str):
     return wf().script_versions(pid)

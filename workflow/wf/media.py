@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import mimetypes
+import re
 import os
 import shutil
 import struct
@@ -458,8 +459,15 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
         for k in range(len(clips)):
             starts.append(0.0 if k == 0 else starts[k - 1] + durs[k - 1] - fades[k - 1])
         for (c, t_in, dur), t0 in zip(pending, starts):
-            if c.get("overlay"):     # 后期贴字（屏幕/短信上的字）：镜头开头显示 3 秒
-                subs.append((t0 + 0.2, t0 + max(0.8, min(dur - 0.1, 3.0)), c["overlay"]))
+            if c.get("overlay"):     # 后期贴字（屏幕/短信上的字）：逐行点亮（借鉴 MYStudio），全部亮起后停 1.5 秒
+                ov = [x.strip() for x in re.split(r"[\n；;]", c["overlay"]) if x.strip()][:6]
+                step = min(1.0, max(0.5, (dur - 1.8) / max(1, len(ov))))
+                end = t0 + max(0.8, min(dur - 0.1, 0.2 + step * len(ov) + 1.5))
+                for k in range(len(ov)):
+                    s0 = t0 + 0.2 + step * k
+                    s1 = t0 + 0.2 + step * (k + 1) if k + 1 < len(ov) else end
+                    if s0 < end:
+                        subs.append((s0, min(s1, end), "\n".join(ov[: k + 1])))
             if c.get("subs"):        # 有配音：字幕按每句配音的真实起止时间（剪掉的片头要扣掉）
                 for s0, s1, txt in c["subs"]:
                     s0, s1 = s0 - t_in, s1 - t_in

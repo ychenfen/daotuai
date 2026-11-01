@@ -260,7 +260,7 @@ class ReviewMixin:
             s = dict(row)
             if c.execute("SELECT 1 FROM jobs WHERE shot_id=? AND status IN ('submitted','running')", (sid,)).fetchone():
                 raise WorkflowError("这个镜头有视频在生成，先取消再拆")
-        segs = llm.segments(s["picture"])
+        segs = llm.segments_full(s["picture"])
         lines = [ln for ln in (s["dialogue"] or "").splitlines() if ln.strip()]
         if len(segs) < 2 and len(lines) < 2:
             raise WorkflowError("这张卡只有一个时间段、一句台词，没法再拆")
@@ -275,8 +275,8 @@ class ReviewMixin:
 
         def retime(part):
             t, out = 0.0, []
-            for x0, x1, txt in part:
-                out.append(f"【{t:g}-{t + (x1 - x0):g}秒】{txt}")
+            for x0, x1, size, txt in part:
+                out.append(f"【{t:g}-{t + (x1 - x0):g}秒{'·' + size if size else ''}】{txt}")
                 t = round(t + (x1 - x0), 2)
             return "".join(out), t
 

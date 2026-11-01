@@ -533,8 +533,28 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
     # 提示词（@绑定）
     # ==================================================================
 
+    # 视频模型容易翻车的写法（OnlyShot 等实测 + 我们第 1 集）：写进提示词就提醒
+    RISKY = [
+        (re.compile(r"弹幕|标语|横幅|写着|印着|招牌上|告示|书法|写字|字幕滚动"), "画面里的文字会被画乱（改成后期贴字）"),
+        (re.compile(r"人群|众人|一群|围观|满屋|千军万马|人山人海"), "多人场面角色一致性差（改成虚化背景或删掉）"),
+        (re.compile(r"打字|弹琴|弹钢琴|数钱|手指特写|穿针|系鞋带"), "手部精细动作容易崩"),
+        (re.compile(r"镜子里|镜中|倒影"), "镜像/倒影容易出错"),
+        (re.compile(r"连续出拳|激烈打斗|翻滚|连环|空翻"), "复杂连续动作演不出来（拆成多张卡）"),
+    ]
+
+    @classmethod
+    def _risky_words(cls, positive: str) -> list[str]:
+        body = "\n".join(ln for ln in positive.replace(llm.SUFFIX, "").splitlines()
+                         if not re.search(r"不出现|不要|避免|禁止|不能有", ln))
+        out = []
+        for pat, why in cls.RISKY:
+            m = pat.search(body)
+            if m:
+                out.append(f"易翻车「{m.group(0)}」：{why}")
+        return out
+
     @staticmethod
-    def _prompt_warnings(positive: str, shot: dict, bible: dict) -> list[str]:
+    def _prompt_warnings(positive: str, shot: dict, bible: dict, assets: list[dict] | None = None) -> list[str]:
         """道具一致性：故事圣经里的关键道具，提示词把它写成了“容易被误写成的东西”（实测：营业部电脑 → 手机），
         或分镜提到了它而提示词漏掉；屏幕文字写进了画面。"""
         out = []
@@ -552,7 +572,17 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
         for ov in (shot.get("overlay") or "").splitlines():
             if len(ov.strip()) >= 4 and ov.strip() in positive:
                 out.append(f"屏幕文字「{ov.strip()[:12]}」写进了画面（应后期贴字）")
-        return out[:6]
+        if assets:   # 借鉴火宝：提示词只引用本镜头出场的人物；同框不超过 2 人（MovieAgent / OnlyShot）
+            chars = {a["name"] for a in assets if a["kind"] in ("character", "creature")}
+            on_shot = {re.sub(r"[（(].*$", "", c) for c in shot.get("characters") or []}
+            used = {n for n in chars if f"@{n}" in positive}
+            extra = sorted(used - on_shot) if on_shot else []
+            if extra:
+                out.append(f"引用了本镜头没有出场的人物：{'、'.join('@' + x for x in extra)}")
+            if len(used) > 2:
+                out.append(f"同框 {len(used)} 个人物，角色一致性会明显下降（建议拆卡或让次要人物虚化）")
+        out += Workflow._risky_words(positive)
+        return out[:8]
 
     def _voices(self, assets: list[dict]) -> dict[str, str]:
         """角色 → 音色资产名。约定：音频资产叫「角色名音色」或「角色名声线」。"""
@@ -594,7 +624,7 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
         with db.tx() as c:
             for shot, item in zip(shots, data):
                 bindings, unresolved = refs.resolve(item["positive"], assets)
-                warns = self._prompt_warnings(item["positive"], shot, proj.get("bible") or {})
+                warns = self._prompt_warnings(item["positive"], shot, proj.get("bible") or {}, assets)
                 old = c.execute("SELECT * FROM prompts WHERE shot_id=?", (shot["id"],)).fetchone()
                 if old:
                     rev = old["rev"] + 1
@@ -711,9 +741,15 @@ class Workflow(AssetsMixin, VideoMixin, QcDubMixin, ReviewMixin, OpsMixin, Produ
                 raise WorkflowError("名字和已有的重复了")
             self._journal(c, pid, kind, oid, rev, list(new), "user")
             if kind == "prompt" and "positive" in new:
-                b, u = refs.resolve(new["positive"], self._assets(c, pid))
-                c.execute("UPDATE prompts SET bindings_json=?, unresolved_json=? WHERE id=?",
-                          (db.dump(b), db.dump(u), oid))
+                assets_ = self._assets(c, pid)
+                b, u = refs.resolve(new["positive"], assets_)
+                srow = c.execute("SELECT s.* FROM shots s JOIN prompts p ON p.shot_id=s.id WHERE p.id=?", (oid,)).fetchone()
+                shot_ = dict(srow) if srow else {}
+                shot_["characters"] = db.load(shot_.get("characters_json") or "[]", [])
+                prow = c.execute("SELECT bible_json FROM projects WHERE id=?", (pid,)).fetchone()
+                warns = self._prompt_warnings(new["positive"], shot_, db.load(prow["bible_json"] or "", {}) or {}, assets_)
+                c.execute("UPDATE prompts SET bindings_json=?, unresolved_json=?, warnings_json=? WHERE id=?",
+                          (db.dump(b), db.dump(u), db.dump(warns), oid))
         return {"changed": sorted(new), "rev": rev, "merged": merged}
 
     # ==================================================================
