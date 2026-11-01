@@ -337,8 +337,8 @@ def build_edl(title: str, clips: list[dict], fps: int = FPS) -> str:
     out = [f"TITLE: {title}", "FCM: NON-DROP FRAME", ""]
     t = 0.0
     for i, c in enumerate(clips, start=1):
-        d = c["seconds"]
-        out.append(f"{i:03d}  AX       AA/V  C        {_tc(0, fps)} {_tc(d, fps)} {_tc(t, fps)} {_tc(t + d, fps)}")
+        d, a = c["seconds"], float(c.get("in") or 0)
+        out.append(f"{i:03d}  AX       AA/V  C        {_tc(a, fps)} {_tc(a + d, fps)} {_tc(t, fps)} {_tc(t + d, fps)}")
         out.append(f"* FROM CLIP NAME: {c['name']}")
         out.append("")
         t += d
@@ -355,10 +355,11 @@ def build_fcpxml(title: str, clips: list[dict], w: int, h: int, folder: str, fps
     for i, c in enumerate(clips, start=1):
         stem = os.path.splitext(c["name"])[0]
         src = quoteattr(f"./{folder}/{c['name']}")
-        dur = r(c["seconds"])
-        assets.append(f'    <asset id="a{i}" name={quoteattr(stem)} start="0s" duration="{dur}" hasVideo="1" '
+        dur, a = r(c["seconds"]), float(c.get("in") or 0)
+        full = r(float(c.get("source_seconds") or c["seconds"] + a))
+        assets.append(f'    <asset id="a{i}" name={quoteattr(stem)} start="0s" duration="{full}" hasVideo="1" '
                       f'hasAudio="1" format="r1"><media-rep kind="original-media" src={src}/></asset>')
-        spine.append(f'          <asset-clip ref="a{i}" offset="{r(t)}" name={quoteattr(stem)} duration="{dur}" start="0s"/>')
+        spine.append(f'          <asset-clip ref="a{i}" offset="{r(t)}" name={quoteattr(stem)} duration="{dur}" start="{r(a)}"/>')
         t += c["seconds"]
     return "\n".join([
         '<?xml version="1.0" encoding="UTF-8"?>', "<!DOCTYPE fcpxml>", '<fcpxml version="1.10">', "  <resources>",
@@ -381,6 +382,24 @@ def _mix_bgm(ff: str, video: str, bgm: str, volume: float, out: str) -> None:
           "-t", f"{dur:.3f}", out])
 
 
+def _xfade_join(ff: str, paths: list[str], durs: list[float], fades: list[float], out: str) -> None:
+    """有叠化时整条重编码：视频 xfade、音频 acrossfade；硬切的接口用 1 帧过渡（几乎看不出）。"""
+    frame = 1.0 / FPS
+    args = [ff, "-y", "-loglevel", "error"]
+    for p in paths:
+        args += ["-i", p]
+    parts, v, a, length = [], "[0:v]", "[0:a]", durs[0]
+    for k in range(1, len(paths)):
+        d = fades[k - 1] or frame
+        off = max(0.0, length - d)
+        parts.append(f"{v}[{k}:v]xfade=transition=fade:duration={d:.3f}:offset={off:.3f}[v{k}]")
+        parts.append(f"{a}[{k}:a]acrossfade=d={d:.3f}[a{k}]")
+        v, a = f"[v{k}]", f"[a{k}]"
+        length = length + durs[k] - d
+    _run(args + ["-filter_complex", ";".join(parts), "-map", v, "-map", a, "-c:v", "libx264", "-preset", "veryfast",
+                 "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "44100", out])
+
+
 def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str, burn: bool,
                    bgm: str = "", bgm_volume: float = 0.25, dub_mode: str = "off", orig_volume: float = 0.35) -> dict:
     ff = ffmpeg_bin()
@@ -391,14 +410,21 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
     w, h = aspect_size(aspect, 720)
     work = tempfile.mkdtemp(prefix="assemble_")
     try:
-        normed, subs, t = [], [], 0.0
+        normed, subs, t, durs, pending = [], [], 0.0, [], []
         for i, c in enumerate(clips):
             info = probe(c["path"])
-            dur = info.get("duration") or float(c.get("seconds") or 0) or 5.0
+            src_dur = info.get("duration") or float(c.get("seconds") or 0) or 5.0
+            t_in = max(0.0, float(c.get("trim_in") or 0))
+            t_out = max(0.0, float(c.get("trim_out") or 0))
+            if src_dur - t_in - t_out < 0.5:     # 剪过头：至少留 0.5 秒
+                t_in, t_out = 0.0, 0.0
+            dur = src_dur - t_in - t_out
+            durs.append(dur)
             norm = os.path.join(work, f"n{i:03d}.mp4")
             vf = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
                   f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p")
-            args = [ff, "-y", "-loglevel", "error", "-i", c["path"]]
+            ss = ["-ss", f"{t_in:.3f}"] if t_in > 0 else []
+            args = [ff, "-y", "-loglevel", "error", *ss, "-i", c["path"]]
             dub = c.get("dub") if dub_mode in ("mix", "replace") else ""
             if dub and os.path.exists(dub):
                 orig = "0:a"
@@ -407,7 +433,7 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
                     orig, di = "1:a", 2
                 else:
                     di = 1
-                args += ["-i", dub]
+                args += [*ss, "-i", dub]        # 配音轨和画面一起剪头
                 fmt = "aresample=44100,aformat=channel_layouts=stereo"
                 if dub_mode == "replace":
                     fc = f"[{di}:a]{fmt},apad[a]"
@@ -423,20 +449,33 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
                      "-c:a", "aac", "-ar", "44100", "-ac", "2", norm]
             _run(args)
             normed.append(norm)
-            if c.get("subs"):        # 有配音：字幕按每句配音的真实起止时间
+            pending.append((c, t_in, dur))
+        # 叠化：第 k 镜和下一镜重叠 xfade 秒，后面所有镜头整体前移
+        fades = [min(float(c.get("xfade") or 0), durs[k] / 2, durs[k + 1] / 2) if k + 1 < len(clips) else 0.0
+                 for k, c in enumerate(clips)]
+        fades = [round(f, 3) if f >= 0.1 else 0.0 for f in fades]
+        starts = []
+        for k in range(len(clips)):
+            starts.append(0.0 if k == 0 else starts[k - 1] + durs[k - 1] - fades[k - 1])
+        for (c, t_in, dur), t0 in zip(pending, starts):
+            if c.get("subs"):        # 有配音：字幕按每句配音的真实起止时间（剪掉的片头要扣掉）
                 for s0, s1, txt in c["subs"]:
-                    if s0 < dur and txt:
-                        subs.append((t + s0, t + min(s1, dur - 0.05), txt))
+                    s0, s1 = s0 - t_in, s1 - t_in
+                    if s1 > 0.1 and s0 < dur and txt:
+                        subs.append((t0 + max(0.0, s0), t0 + min(s1, dur - 0.05), txt))
             elif c.get("dialogue"):
-                subs.append((t + 0.1, t + dur - 0.1, c["dialogue"]))
-            t += dur
+                subs.append((t0 + 0.1, t0 + dur - 0.1, c["dialogue"]))
+        t = starts[-1] + durs[-1]
         listing = os.path.join(work, "list.txt")
         with open(listing, "w", encoding="utf-8") as f:
             for n in normed:
                 f.write(f"file '{os.path.basename(n)}'\n")
         joined = os.path.join(work, "joined.mp4")
-        _run([ff, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", "list.txt",
-              "-c", "copy", "joined.mp4"], cwd=work)
+        if any(fades):
+            _xfade_join(ff, normed, durs, fades, joined)
+        else:
+            _run([ff, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", "list.txt",
+                  "-c", "copy", "joined.mp4"], cwd=work)
         srt = build_srt(subs)
         with open(srt_path, "w", encoding="utf-8") as f:
             f.write(srt)
@@ -461,6 +500,7 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
             shutil.move(mixed, out_path)
         return {"path": out_path, "srt_path": srt_path, "seconds": round(t, 3), "clips": len(clips),
                 "subtitles": len(subs), "burned": bool(srt and burn), "bgm": bool(bgm),
+                "starts": [round(x, 3) for x in starts], "fades": fades,
                 "dubbed": sum(1 for c in clips if c.get("dub")) if dub_mode in ("mix", "replace") else 0}
     finally:
         shutil.rmtree(work, ignore_errors=True)

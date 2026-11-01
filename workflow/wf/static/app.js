@@ -4,9 +4,9 @@ const S = {page: 'home', pid: null, p: null, list: [], models: [], health: null,
   assetKind: 'all', assetQ: '', sceneId: null, sceneFilter: 'all', shotId: null, sel: new Set(), chatSid: null,
   notif: {items: [], unread: 0}, notifOpen: false, vp: {}, voices: []};
 const PAGES = [['home', '⌂', '首页'], ['script', '✎', '剧本'], ['assets', '▣', '资产'], ['board', '▤', '分镜'],
-  ['blocking', '⌖', '站位图'], ['prompts', '❝', '提示词'], ['videos', '▶', '视频'], ['final', '🎬', '成片'],
+  ['blocking', '⌖', '站位图'], ['prompts', '❝', '提示词'], ['videos', '▶', '视频'], ['edit', '✂', '剪辑'], ['final', '🎬', '成片'],
   ['chat', '💬', '对话'], ['help', '?', '教程']];
-const NEED_PROJECT = new Set(['script', 'assets', 'board', 'blocking', 'prompts', 'videos', 'final']);
+const NEED_PROJECT = new Set(['script', 'assets', 'board', 'blocking', 'prompts', 'videos', 'edit', 'final']);
 const KIND = {character: '角色', scene: '场景', prop: '道具', creature: '生物', audio: '音频'};
 const STATUS = {draft: '草稿', script_ready: '剧本就绪', parsed: '已解析', assets_ready: '资产就绪', storyboard_done: '分镜完成',
   prompts_done: '提示词完成', videos_running: '出片中', videos_done: '视频完成', final_ready: '成片完成',
@@ -153,7 +153,7 @@ function toggleTheme() {
 }
 function render() {
   const fn = {home: pgHome, script: pgScript, assets: pgAssets, board: pgBoard, blocking: pgBlocking, prompts: pgPrompts,
-    videos: pgVideos, final: pgFinal, chat: pgChat, help: pgHelp}[S.page] || pgHome;
+    videos: pgVideos, edit: pgEdit, final: pgFinal, chat: pgChat, help: pgHelp}[S.page] || pgHome;
   if (NEED_PROJECT.has(S.page) && !S.p) { $('#page').innerHTML = `<div class="empty">先新建或选择一个项目<br><br><button class="primary" onclick="go('home')">去首页新建项目</button></div>`; return; }
   $('#page').innerHTML = fn();
   if (S.page === 'chat') { const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight; }
@@ -895,6 +895,51 @@ async function splitShot(sid, btn) {
   if (!confirm(`把镜头 ${s.code} 按时间轴一分为二？两张卡都要重新生成提示词和视频，原来的视频保留在历史里。`)) return;
   const r = await act(btn, () => api('POST', `/shots/${sid}/split`), r => `已拆成 ${r.codes.join(' 和 ')}（${r.durations.join('s / ')}s）`);
   if (r) { const m = btn && btn.closest('.modal'); if (m) m.remove(); }
+}
+
+// ---------------- 剪辑（时间线精修 + 审片） ----------------
+const XF = [[0, '硬切'], [0.3, '叠化 0.3s'], [0.5, '叠化 0.5s'], [1, '叠化 1s']];
+function keptSec(s) { const d = (s.job && s.job.seconds) || s.duration_s; return Math.max(0.5, d - (s.trim_in || 0) - (s.trim_out || 0)); }
+function pgEdit() {
+  const e = curEp(); if (!e) return '<div class="empty">先在剧本页解析分集</div>';
+  const shots = S.p.shots.filter(s => s.episode_id === e.id);
+  const ready = shots.filter(s => s.job && s.job.status === 'succeeded');
+  const total = ready.reduce((t, s, i) => t + keptSec(s) - (i < ready.length - 1 ? (s.xfade_s || 0) : 0), 0);
+  const col = s => !s.job || s.job.status !== 'succeeded' ? 'var(--line)' : s.job.review === 'rejected' ? 'var(--bad)'
+    : s.job.qc ? ({pass: 'var(--ok)', warn: 'var(--warn)', fail: 'var(--bad)'})[s.job.qc.verdict] : 'var(--accent)';
+  const n = k => ready.filter(s => (s.job.review || '') === k).length;
+  return `<div class="card"><div class="bar"><h3 style="margin:0">剪辑</h3>${epSelect()}
+    <span class="badge">${ready.length}/${shots.length} 镜可用 · 约 ${total.toFixed(1)} 秒</span>
+    <span class="badge ok">通过 ${n('approved')}</span><span class="badge bad">打回 ${n('rejected')}</span><span class="badge">未审 ${n('')}</span>
+    <span class="spacer"></span><button onclick="retakeEpisode(this,${e.no})">重抽不合格/打回的</button>
+    <button class="primary" onclick="act(this,()=>api('POST','/projects/${S.pid}/assemble?episode_no=${e.no}&allow_partial=true'),'已按剪辑合成本集')">按剪辑合成本集</button>
+    ${e.final_url ? `<a href="${esc(e.final_url)}" target="_blank"><button>看成片</button></a>` : ''}</div>
+    <div class="small muted" style="margin-top:6px">模型出片常见“起势慢、收尾拖”：用片头/片尾剪掉多余的部分，镜头之间可选叠化。颜色：绿=质检合格，黄=待看，红=不合格或打回，灰=还没出片。</div>
+    <div class="timeline">${shots.map(s => `<div class="tl-clip" title="${s.code}" style="flex:${keptSec(s)};border-color:${col(s)}" onclick="document.getElementById('cut-${s.id}').scrollIntoView({behavior:'smooth',block:'center'})">
+      ${s.job && s.job.poster_url ? `<img src="${esc(s.job.poster_url)}">` : ''}<b>${s.code}</b></div>${s.xfade_s ? '<span class="tl-x" title="叠化">⋈</span>' : ''}`).join('')}</div></div>
+  ${shots.map(cutRow).join('')}`;
+}
+function cutRow(s) {
+  const j = s.job && s.job.status === 'succeeded' ? s.job : null;
+  if (!j) return `<div class="card row" id="cut-${s.id}"><b>${s.code}</b>${badge(s.status)}<span class="muted small">还没出片</span><span class="spacer"></span><button class="small" onclick="S.shotId='${s.id}';go('videos')">去视频页</button></div>`;
+  const d = j.seconds || s.duration_s, a = s.trim_in || 0, b = d - (s.trim_out || 0);
+  const src = j.play_url ? `${j.play_url}#t=${a.toFixed(2)},${b.toFixed(2)}` : '';
+  return `<div class="card" id="cut-${s.id}"><div class="split2" style="grid-template-columns:220px 1fr">
+    <div>${src ? `<video controls preload="metadata" src="${esc(src)}" poster="${esc(j.poster_url || '')}" style="max-height:300px"></video>` : '<div class="thumb ph small">无本地文件</div>'}</div>
+    <div><div class="row"><b>${s.code}</b><span class="muted small">v${j.version} · 原长 ${(+d).toFixed(1)}s → 保留 ${keptSec(s).toFixed(1)}s</span>${qcBadge(j.qc)}
+      <span class="spacer"></span><button class="small" onclick="S.shotId='${s.id}';go('videos')">版本 / 重抽</button></div>
+      <div class="small" style="margin-top:6px">${esc(s.dialogue || '').replace(/\n/g, ' / ') || '<span class="muted">（无台词）</span>'}</div>
+      <div class="row small" style="margin-top:8px;gap:12px">
+        <label>片头剪掉 <input type="number" min="0" step="0.1" value="${a}" style="width:70px" onchange="setCut('${s.id}',{trim_in:+this.value})"> 秒</label>
+        <label>片尾剪掉 <input type="number" min="0" step="0.1" value="${s.trim_out || 0}" style="width:70px" onchange="setCut('${s.id}',{trim_out:+this.value})"> 秒</label>
+        <label>到下一镜 <select onchange="setCut('${s.id}',{xfade_s:+this.value})">${XF.map(([v, t]) => `<option value="${v}" ${(+s.xfade_s || 0) === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label></div>
+      ${s.dub ? `<div class="small muted" style="margin-top:4px">配音：${s.dub.lines.map(x => `${x.start.toFixed(1)}-${x.end.toFixed(1)}s ${esc(x.speaker)}`).join('，')}（剪辑不要剪到台词）</div>` : ''}
+      ${j.qc && j.qc.issues.length ? `<div class="small warnc" style="margin-top:4px">质检：${esc(j.qc.issues.slice(0, 2).map(i => i.detail).join('；'))}</div>` : ''}
+      ${reviewBar(j)}</div></div></div>`;
+}
+async function setCut(sid, body) {
+  const r = await act(null, () => api('POST', `/shots/${sid}/cut`, body), r => `已保存：保留 ${r.kept_seconds}s`);
+  if (r && r.cuts_dialogue) toast(`注意：剪到了配音台词“${r.cuts_dialogue.slice(0, 20)}”`, true);
 }
 
 // ---------------- 成片 ----------------

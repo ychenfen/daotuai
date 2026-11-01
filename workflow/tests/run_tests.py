@@ -883,6 +883,40 @@ async def main() -> int:
         r = await c.post(f"/shots/{sp2['new']}/split")
         check("只剩一段一句的卡不能再拆", r.status_code == 400, r.text[:100])
 
+        print("\n[Z2] 剪辑精修：入点/出点、叠化")
+        if HAS_FFMPEG:
+            await c.patch(f"/projects/{pid}/settings", json={"dub_mode": "off", "bgm_material_id": "", "burn_subtitles": False})
+            st = await j(await c.get(f"/projects/{pid}"))
+            ep1 = [s for s in st["shots"] if s["episode_no"] == 1 and s["job"] and s["job"]["status"] == "succeeded"
+                   and s["job"]["local_path"]]
+            a, b = ep1[0], ep1[1]
+            r = await c.post(f"/shots/{a['id']}/cut", json={"trim_in": 30, "trim_out": 0})
+            check("剪过头 400（至少留 1 秒）", r.status_code == 400, r.text[:100])
+            r = await c.post(f"/shots/{a['id']}/cut", json={"xfade_s": 3})
+            check("叠化超过 2 秒 400", r.status_code == 400, "")
+            cut = await j(await c.post(f"/shots/{a['id']}/cut", json={"trim_in": 0.5, "trim_out": 0.5, "xfade_s": 0.5}))
+            check("设置入点/出点/叠化", cut["trim_in"] == 0.5 and cut["xfade_s"] == 0.5, json.dumps(cut))
+            st = await j(await c.get(f"/projects/{pid}"))
+            durs = {s["id"]: media.probe(s["job"]["local_path"])["duration"] for s in st["shots"] if s["id"] in [x["id"] for x in ep1]}
+            asm = await j(await c.post(f"/projects/{pid}/assemble?episode_no=1&allow_partial=true"))
+            st = await j(await c.get(f"/projects/{pid}"))
+            fin = media.probe(st["episodes"][0]["final_path"])["duration"]
+            expect = sum(durs.values()) - 1.0 - 0.5
+            check("成片时长 = 各镜之和 − 剪掉的 − 叠化重叠", abs(fin - expect) < 0.35,
+                  json.dumps({"final": fin, "expect": expect, "durs": list(durs.values())}))
+            srt = open(st["episodes"][0]["srt_path"], encoding="utf-8").read()
+            check("叠化后字幕仍然有且按顺序", srt.count("-->") >= 1, srt[:200])
+            import zipfile as _zf
+            rz = await c.get(f"/projects/{pid}/edit-package?episode_no=1")
+            zp = os.path.join(TMP, "edit_cut.zip")
+            open(zp, "wb").write(rz.content)
+            with _zf.ZipFile(zp) as z:
+                edl = z.read(next(n for n in z.namelist() if n.endswith(".edl"))).decode("utf-8")
+                fx = z.read(next(n for n in z.namelist() if n.endswith(".fcpxml"))).decode("utf-8")
+            check("剪辑工程按入点导出（EDL 源入点 00:00:00:12、FCPXML start=12/24s）",
+                  "00:00:00:12" in edl.splitlines()[3] and 'start="12/24s"' in fx, edl[:300])
+            await j(await c.post(f"/shots/{a['id']}/cut", json={"trim_in": 0, "trim_out": 0, "xfade_s": 0}))
+
         print("\n[U] 聚合层账本")
         from app.main import app as agg_app  # noqa: E402
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=agg_app), base_url="http://agg", timeout=30) as ac:

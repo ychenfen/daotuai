@@ -585,6 +585,11 @@ def density(pid: str, episode_no: int | None = None):
     return wf().density(pid, episode_no)
 
 
+@app.post("/shots/{sid}/cut")
+def set_cut(sid: str, body: dict = Body(...)):
+    return wf().set_cut(sid, body.get("trim_in"), body.get("trim_out"), body.get("xfade_s"))
+
+
 @app.post("/shots/{sid}/split")
 async def split_shot(sid: str):
     return await wf().split_shot(sid)

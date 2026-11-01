@@ -298,6 +298,9 @@ MIGRATIONS = [
     ("jobs", "retake_json", "TEXT NOT NULL DEFAULT ''"),          # 重抽依据（问题、改动、来源）
     ("jobs", "review", "TEXT NOT NULL DEFAULT ''"),               # 审片：'' 未审 | approved | rejected
     ("jobs", "review_note", "TEXT NOT NULL DEFAULT ''"),
+    ("shots", "trim_in", "REAL NOT NULL DEFAULT 0"),              # 剪辑：片头剪掉几秒
+    ("shots", "trim_out", "REAL NOT NULL DEFAULT 0"),             # 剪辑：片尾剪掉几秒
+    ("shots", "xfade_s", "REAL NOT NULL DEFAULT 0"),              # 剪辑：和下一镜叠化几秒（0 = 硬切）
 ]
 
 

@@ -166,6 +166,40 @@ class ReviewMixin:
             self.notify(pid, "warning", "自动重抽没有提交", str(e)[:300])
 
     # ==================================================================
+    # 剪辑精修：入点/出点、叠化
+    # ==================================================================
+
+    def set_cut(self, sid: str, trim_in: float | None = None, trim_out: float | None = None,
+                xfade_s: float | None = None) -> dict:
+        """片头/片尾各剪掉几秒（模型出片常有起势慢、收尾拖的问题），和下一镜叠化几秒（0 = 硬切）。"""
+        with db.tx() as c:
+            s = c.execute("SELECT s.*, j.seconds jsec FROM shots s LEFT JOIN jobs j ON j.id=s.selected_job_id "
+                          "WHERE s.id=?", (sid,)).fetchone()
+            if not s:
+                raise NotFound("镜头不存在")
+            dur = float(s["jsec"] or s["duration_s"] or 5)
+            ti = float(s["trim_in"] if trim_in is None else trim_in)
+            to = float(s["trim_out"] if trim_out is None else trim_out)
+            xf = float(s["xfade_s"] if xfade_s is None else xfade_s)
+            if ti < 0 or to < 0 or xf < 0:
+                raise WorkflowError("剪辑时长不能是负数")
+            if dur - ti - to < 1.0:
+                raise WorkflowError(f"剪完至少要留 1 秒（这一镜 {dur:g} 秒）")
+            if xf > 2.0:
+                raise WorkflowError("叠化最长 2 秒")
+            c.execute("UPDATE shots SET trim_in=?, trim_out=?, xfade_s=?, updated_at=? WHERE id=?",
+                      (round(ti, 2), round(to, 2), round(xf, 2), db.now(), sid))
+            c.execute("UPDATE episodes SET final_path='', srt_path='', final_seconds=0 WHERE id=?", (s["episode_id"],))
+        cut = None
+        dub = db.load(s["dub_json"] or "", {}) or {}
+        for ln in dub.get("lines", []):     # 剪到配音台词时提醒
+            if ln["start"] < ti - 0.05 or ln["end"] > dur - to + 0.05:
+                cut = ln["text"]
+                break
+        return {"shot": sid, "trim_in": round(ti, 2), "trim_out": round(to, 2), "xfade_s": round(xf, 2),
+                "kept_seconds": round(dur - ti - to, 2), "cuts_dialogue": cut}
+
+    # ==================================================================
     # 动作过密检查 / 拆卡
     # ==================================================================
 
