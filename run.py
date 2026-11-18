@@ -18,6 +18,23 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 LOGS = os.path.join(ROOT, "data", "logs")
 
 
+def _load_dotenv() -> None:
+    env_path = os.path.join(ROOT, ".env")
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            if k and v:
+                cur = os.environ.get(k, "")
+                if not cur or "你的" in cur:
+                    os.environ[k] = v
+
+
 def wait_ok(url: str, timeout: float = 40) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -39,6 +56,7 @@ def main() -> int:
     ap.add_argument("--wf-port", type=int, default=8011)
     a = ap.parse_args()
 
+    _load_dotenv()
     os.makedirs(LOGS, exist_ok=True)
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
                AGG_BASE=f"http://127.0.0.1:{a.agg_port}")

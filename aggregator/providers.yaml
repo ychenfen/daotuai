@@ -2,7 +2,7 @@
 # kind: openai = OpenAI 兼容 /v1/chat/completions；ark = 火山方舟（文本/图像 OpenAI 兼容，视频走任务接口）
 # 没有 key 的渠道自动走 mock；设 AGG_FORCE_MOCK=1 时全部走 mock。
 providers:
-  # ---------- 真实可用：纪总电脑上已配好 key 的三家 ----------
+  # ---------- 真实可用：默认支持的国产与 Google 渠道 ----------
   - id: deepseek
     label: DeepSeek 官方
     kind: openai
@@ -174,4 +174,41 @@ providers:
     api_key_env: HG_API_KEY
     enabled: false
     concurrency: 2
+    timeout_s: 180
+
+  # ---------- Google AI Studio / Gemini Developer API（每月 $40 Ultra 赠金可用） ----------
+  - id: google_gemini
+    label: Google Gemini (文本/视觉/出图)
+    kind: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    api_key_env: GEMINI_API_KEY
+    concurrency: 8
+    timeout_s: 180
+  - id: google_veo
+    label: Google Veo (视频生成)
+    kind: gemini_veo
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    api_key_env: GEMINI_API_KEY
+    concurrency: 4
+    timeout_s: 180
+  - id: vertex_gemini
+    label: Vertex AI Gemini (GCP 赠金)
+    kind: vertex_gemini
+    base_url: https://aiplatform.googleapis.com/v1
+    api_key_env: VERTEX_PROJECT_ID
+    concurrency: 8
+    timeout_s: 180
+  - id: vertex_imagen
+    label: Vertex AI Imagen (GCP 赠金)
+    kind: vertex_imagen
+    base_url: https://us-central1-aiplatform.googleapis.com/v1
+    api_key_env: VERTEX_PROJECT_ID
+    concurrency: 4
+    timeout_s: 180
+  - id: vertex_veo
+    label: Vertex AI Veo 3.1 (GCP 赠金)
+    kind: vertex_veo
+    base_url: https://us-central1-aiplatform.googleapis.com/v1
+    api_key_env: VERTEX_PROJECT_ID
+    concurrency: 1
     timeout_s: 180

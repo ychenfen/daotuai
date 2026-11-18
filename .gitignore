@@ -1,6 +1,7 @@
 # 运行时与本机数据：不进仓库
 __pycache__/
 *.pyc
+.venv/
 data/
 *.db
 *.db-wal

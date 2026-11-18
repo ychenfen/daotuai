@@ -1,6 +1,8 @@
-# 短剧工作台 · 内部自用版
+# AI 短剧工作台（daotuai）· AI Short-Drama Studio
 
-剧本 → 资产 → 分镜 → 站位图 → 提示词 → 视频 → 成片，一条线跑通。功能对照刀徒 AI 的截图逐页补齐（见 `screens/` 截图册与 `刀徒AI-工作流与模型调用拆解.md`）。
+> End-to-end local AI short-drama production workbench: **Script → Story Bible & Beats → Assets → Storyboard → Blocking Chart → `@` Asset Prompts → Multi-model Video (Google Veo 3.1 / Wan 3.0 / Seedance / LibTV) → Visual QC & TTS Dubbing → Final MP4 + JianYing (剪映 / CapCut) Draft Export**.
+
+剧本 → 资产 → 分镜 → 站位图 → 提示词 → 视频 → 成片，一条线跑通。支持 **Google Vertex AI（Gemini 3 / 2.5 Flash Image / Veo 3.1）**、**DeepSeek**、**阿里百炼（万相 3.0 / Qwen-VL / Qwen-TTS）**、**火山方舟（Seedream / Seedance）**、**LibTV**，无 key 时可用 `--mock` 零成本演练全流程。
 
 ```
 ┌──────────────────────────────────┐  HTTP  ┌─────────────────────────────┐

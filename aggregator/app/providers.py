@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import time
@@ -32,7 +33,97 @@ def _mock_disabled(provider: Provider) -> bool:
 
 
 def _headers(provider: Provider) -> dict:
+    if provider.kind in ("gemini", "gemini_veo"):
+        return {"x-goog-api-key": provider.api_key, "Content-Type": "application/json"}
+    if provider.kind in ("vertex_gemini", "vertex_imagen", "vertex_veo"):
+        return {"Authorization": f"Bearer {_gcloud_token()}", "Content-Type": "application/json"}
     return {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
+
+
+_GCLOUD_TOK: tuple[str, float] = ("", 0.0)
+
+
+def _gcloud_token() -> str:
+    global _GCLOUD_TOK
+    tok, exp = _GCLOUD_TOK
+    if tok and time.time() < exp:
+        return tok
+    import subprocess
+    res = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=15)
+    if res.returncode != 0 or not res.stdout.strip():
+        raise RuntimeError(f"gcloud auth print-access-token failed: {res.stderr.strip()}")
+    tok = res.stdout.strip()
+    _GCLOUD_TOK = (tok, time.time() + 2700)
+    return tok
+
+
+def _vertex_model_path(provider: Provider, api_id: str, action: str, location: str = "us-central1") -> str:
+    proj = provider.api_key
+    return f"/projects/{proj}/locations/{location}/publishers/google/models/{api_id}:{action}"
+
+
+async def _url_to_b64(provider: Provider, url: str) -> tuple[str, str]:
+    """Convert data URI or http(s) URL into (mime_type, base64_data) for Gemini/Veo."""
+    if url.startswith("data:") and ";base64," in url:
+        head, b64 = url.split(";base64,", 1)
+        mime = head[5:] or "image/png"
+        return mime, b64
+    if url.startswith(("http://", "https://")):
+        try:
+            async with _client(provider) as client:
+                r = await client.get(url, follow_redirects=True)
+                r.raise_for_status()
+                mime = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+                return mime, base64.b64encode(r.content).decode("ascii")
+        except httpx.HTTPError as e:
+            raise ProviderError(provider.id, None, f"fetch ref image failed: {e}") from e
+    raise ProviderError(provider.id, 400, f"unsupported image ref format: {url[:60]}", retryable=False)
+
+
+async def _to_gemini_contents(provider: Provider, messages: list[dict]) -> tuple[dict | None, list[dict]]:
+    """Translate OpenAI chat messages into Gemini systemInstruction + contents."""
+    sys_parts: list[dict] = []
+    contents: list[dict] = []
+    for msg in messages or []:
+        role = msg.get("role") or "user"
+        raw = msg.get("content", "")
+        parts: list[dict] = []
+        if isinstance(raw, str):
+            if raw:
+                parts.append({"text": raw})
+        elif isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                t = item.get("type")
+                if t == "text" and item.get("text"):
+                    parts.append({"text": str(item["text"])})
+                elif t in ("image_url", "input_image"):
+                    u = item.get("image_url")
+                    url = u.get("url") if isinstance(u, dict) else u
+                    if url:
+                        mime, b64 = await _url_to_b64(provider, str(url))
+                        parts.append({"inlineData": {"mimeType": mime, "data": b64}})
+        if not parts:
+            continue
+        if role == "system":
+            sys_parts.extend(parts)
+        else:
+            contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
+    sys_inst = {"parts": sys_parts} if sys_parts else None
+    return sys_inst, contents
+
+
+def _gemini_aspect_from_size(size: str | None) -> str | None:
+    if not size or "x" not in size.lower():
+        return None
+    try:
+        w, h = [int(x) for x in size.lower().split("x", 1)]
+    except ValueError:
+        return None
+    if w == h:
+        return "1:1"
+    return "9:16" if h > w else "16:9"
 
 
 def _client(provider: Provider) -> httpx.AsyncClient:
@@ -47,15 +138,20 @@ def _client(provider: Provider) -> httpx.AsyncClient:
 
 async def _post(provider: Provider, path: str, payload: dict, extra_headers: dict | None = None) -> dict:
     url = provider.base_url.rstrip("/") + path
-    try:
-        async with _client(provider) as client:
-            r = await client.post(url, json=payload, headers={**_headers(provider), **(extra_headers or {})})
-    except httpx.HTTPError as e:
-        raise ProviderError(provider.id, None, f"network: {e}") from e
-    if r.status_code >= 400:
-        raise ProviderError(provider.id, r.status_code, r.text[:300],
-                            retryable=r.status_code >= 500 or r.status_code in (408, 429))
-    return r.json()
+    for attempt in range(4):
+        try:
+            async with _client(provider) as client:
+                r = await client.post(url, json=payload, headers={**_headers(provider), **(extra_headers or {})})
+        except httpx.HTTPError as e:
+            raise ProviderError(provider.id, None, f"network: {e}") from e
+        if r.status_code == 429 and attempt < 3:
+            await asyncio.sleep(5 * (attempt + 1))
+            continue
+        if r.status_code >= 400:
+            raise ProviderError(provider.id, r.status_code, r.text[:300],
+                                retryable=r.status_code >= 500 or r.status_code in (408, 429))
+        return r.json()
+    raise ProviderError(provider.id, 429, "rate limited after retries", retryable=True)
 
 
 async def _get(provider: Provider, path: str) -> dict:
@@ -87,6 +183,31 @@ async def chat(provider: Provider, api_id: str, payload: dict) -> dict:
                 "usage": {"prompt_tokens": max(1, len(last) // 2 + n_img * 1500),
                           "completion_tokens": max(1, len(text) // 2)},
                 "provider_model": api_id}
+    if provider.kind in ("gemini", "vertex_gemini"):
+        sys_inst, contents = await _to_gemini_contents(provider, payload.get("messages") or [])
+        gen_cfg: dict = {}
+        if payload.get("temperature") is not None:
+            gen_cfg["temperature"] = payload["temperature"]
+        if payload.get("max_tokens") is not None:
+            gen_cfg["maxOutputTokens"] = payload["max_tokens"]
+        body = {"contents": contents}
+        if sys_inst:
+            body["systemInstruction"] = sys_inst
+        if gen_cfg:
+            body["generationConfig"] = gen_cfg
+        path = (_vertex_model_path(provider, api_id, "generateContent", "global")
+                if provider.kind == "vertex_gemini" else f"/models/{api_id}:generateContent")
+        data = await _post(provider, path, body)
+        cands = data.get("candidates") or []
+        parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
+        text = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict) and p.get("text"))
+        meta = data.get("usageMetadata") or {}
+        return {
+            "content": text,
+            "usage": {"prompt_tokens": meta.get("promptTokenCount", 0),
+                      "completion_tokens": meta.get("candidatesTokenCount", 0)},
+            "provider_model": data.get("modelVersion", api_id),
+        }
     body = {"model": api_id, **{k: v for k, v in payload.items() if k != "model"}}
     data = await _post(provider, "/chat/completions", body)
     choice = (data.get("choices") or [{}])[0]
@@ -115,6 +236,52 @@ async def chat_stream(provider: Provider, api_id: str, payload: dict) -> AsyncIt
                "usage": {"prompt_tokens": prompt_tokens,
                          "completion_tokens": max(1, len("".join(MOCK_CHUNKS)) // 2)},
                "provider_model": api_id}
+        return
+
+    if provider.kind in ("gemini", "vertex_gemini"):
+        sys_inst, contents = await _to_gemini_contents(provider, payload.get("messages") or [])
+        gen_cfg: dict = {}
+        if payload.get("temperature") is not None:
+            gen_cfg["temperature"] = payload["temperature"]
+        if payload.get("max_tokens") is not None:
+            gen_cfg["maxOutputTokens"] = payload["max_tokens"]
+        body = {"contents": contents}
+        if sys_inst:
+            body["systemInstruction"] = sys_inst
+        if gen_cfg:
+            body["generationConfig"] = gen_cfg
+        path = (_vertex_model_path(provider, api_id, "streamGenerateContent?alt=sse", "global")
+                if provider.kind == "vertex_gemini" else f"/models/{api_id}:streamGenerateContent?alt=sse")
+        url = provider.base_url.rstrip("/") + path
+        usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        try:
+            async with _client(provider) as client:
+                async with client.stream("POST", url, json=body, headers=_headers(provider)) as r:
+                    if r.status_code >= 400:
+                        text = (await r.aread()).decode("utf-8", "ignore")[:300]
+                        raise ProviderError(provider.id, r.status_code, text,
+                                            retryable=r.status_code >= 500 or r.status_code in (408, 429))
+                    async for line in r.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw or raw == "[DONE]":
+                            continue
+                        try:
+                            obj = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if obj.get("usageMetadata"):
+                            meta = obj["usageMetadata"]
+                            usage = {"prompt_tokens": meta.get("promptTokenCount", 0),
+                                     "completion_tokens": meta.get("candidatesTokenCount", 0)}
+                        for cand in obj.get("candidates") or []:
+                            for part in (cand.get("content") or {}).get("parts") or []:
+                                if isinstance(part, dict) and part.get("text"):
+                                    yield {"delta": part["text"]}
+        except httpx.HTTPError as e:
+            raise ProviderError(provider.id, None, f"network: {e}") from e
+        yield {"done": True, "usage": usage, "provider_model": api_id}
         return
 
     url = provider.base_url.rstrip("/") + "/chat/completions"
@@ -163,9 +330,49 @@ async def image(provider: Provider, api_id: str, payload: dict) -> dict:
         n = int(payload.get("n", 1))
         return {"images": [f"https://mock.local/{provider.id}/{uuid.uuid4().hex[:8]}.png" for _ in range(n)],
                 "provider_model": api_id, "usage": {"images": n}}
+    refs = [u for u in (payload.get("image") or []) if u]
+    if provider.kind == "vertex_imagen":
+        aspect = payload.get("aspect_ratio") or _gemini_aspect_from_size(payload.get("size")) or "9:16"
+        body = {
+            "instances": [{"prompt": payload.get("prompt", "")}],
+            "parameters": {"sampleCount": int(payload.get("n", 1)), "aspectRatio": aspect},
+        }
+        data = await _post(provider, _vertex_model_path(provider, api_id, "predict", "us-central1"), body)
+        images = []
+        for pred in data.get("predictions") or []:
+            b64 = pred.get("bytesBase64Encoded") if isinstance(pred, dict) else None
+            if b64:
+                mime = pred.get("mimeType") or "image/png"
+                images.append(f"data:{mime};base64,{b64}")
+        if not images:
+            raise ProviderError(provider.id, None, f"no image in vertex imagen response: {str(data)[:200]}")
+        return {"images": images, "provider_model": api_id, "usage": {"images": len(images)}}
+    if provider.kind in ("gemini", "vertex_gemini"):
+        parts: list[dict] = [{"text": payload.get("prompt", "")}]
+        for u in refs:
+            mime, b64 = await _url_to_b64(provider, str(u))
+            parts.append({"inlineData": {"mimeType": mime, "data": b64}})
+        gen_cfg: dict = {"responseModalities": ["TEXT", "IMAGE"]}
+        aspect = payload.get("aspect_ratio") or _gemini_aspect_from_size(payload.get("size"))
+        if aspect:
+            gen_cfg["imageConfig"] = {"aspectRatio": aspect}
+        path = (_vertex_model_path(provider, api_id, "generateContent", "global")
+                if provider.kind == "vertex_gemini" else f"/models/{api_id}:generateContent")
+        data = await _post(provider, path,
+                           {"contents": [{"role": "user", "parts": parts}], "generationConfig": gen_cfg})
+        images = []
+        for cand in data.get("candidates") or []:
+            for p in (cand.get("content") or {}).get("parts") or []:
+                inline = p.get("inlineData") if isinstance(p, dict) else None
+                if inline and inline.get("data"):
+                    mime = inline.get("mimeType") or "image/png"
+                    images.append(f"data:{mime};base64,{inline['data']}")
+        if not images:
+            raise ProviderError(provider.id, None, f"no image in gemini response: {str(data)[:200]}")
+        return {"images": images, "provider_model": data.get("modelVersion", api_id),
+                "usage": {"images": len(images)}}
     body = {"model": api_id, "prompt": payload.get("prompt", ""), "n": int(payload.get("n", 1)),
             "size": payload.get("size") or "1024x1024", "response_format": "url"}
-    refs = [u for u in (payload.get("image") or []) if u]
     if provider.kind == "ark":
         body.pop("n", None)
         body["watermark"] = False
@@ -274,6 +481,45 @@ async def submit_video(provider: Provider, api_id: str, spec: str, payload: dict
         data = await _post(provider, "/services/aigc/video-generation/video-synthesis", body,
                            {"X-DashScope-Async": "enable"})
         data = data.get("output") or data
+    elif provider.kind in ("gemini_veo", "vertex_veo"):
+        raw_dur = float(payload.get("duration", 8))
+        dur = 4 if raw_dur <= 4 else (6 if raw_dur <= 6 else 8)
+        instance: dict = {"prompt": payload.get("prompt", "")}
+        first_imgs = [i for i in images if i["role"] == "first_frame"]
+        last_imgs = [i for i in images if i["role"] == "last_frame"]
+        ref_imgs = [i for i in images if i["role"] == "reference_image"]
+        if first_imgs or last_imgs:
+            lead = first_imgs[0] if first_imgs else last_imgs[0]
+            mime, b64 = await _url_to_b64(provider, lead["url"])
+            instance["image"] = {"bytesBase64Encoded": b64, "mimeType": mime}
+            if last_imgs and first_imgs:
+                lmime, lb64 = await _url_to_b64(provider, last_imgs[0]["url"])
+                instance["lastFrame"] = {"bytesBase64Encoded": lb64, "mimeType": lmime}
+                dur = 8
+        elif ref_imgs:
+            refs_payload = []
+            for img in ref_imgs[:3]:
+                mime, b64 = await _url_to_b64(provider, img["url"])
+                refs_payload.append({"image": {"bytesBase64Encoded": b64, "mimeType": mime}, "referenceType": "asset"})
+            instance["referenceImages"] = refs_payload
+            dur = 8
+        res_str = spec.lower() if spec and spec.lower() in ("720p", "1080p") else "720p"
+        body = {
+            "instances": [instance],
+            "parameters": {
+                "sampleCount": 1,
+                "aspectRatio": payload.get("aspect_ratio", "16:9"),
+                "resolution": res_str,
+                "durationSeconds": dur,
+            },
+        }
+        path = (_vertex_model_path(provider, api_id, "predictLongRunning", "us-central1")
+                if provider.kind == "vertex_veo" else f"/models/{api_id}:predictLongRunning")
+        data = await _post(provider, path, body)
+        op_name = data.get("name")
+        if not op_name:
+            raise ProviderError(provider.id, None, f"no operation name in response: {str(data)[:200]}")
+        return {"provider_task_id": op_name, "state": "submitted"}
     else:
         body = {"model": api_id, "prompt": payload.get("prompt", ""),
                 "duration": int(round(float(payload.get("duration", 5)))), "quality": spec.lower(),
@@ -374,6 +620,37 @@ async def poll_video(provider: Provider, provider_task_id: str) -> dict:
         seconds = usage.get("output_video_duration") or usage.get("duration")
         return {"state": state, "url": out.get("video_url"), "seconds": seconds,
                 "usage": {"output_seconds": seconds}, "error": out.get("message") or out.get("code")}
+    if provider.kind == "vertex_veo":
+        # provider_task_id: projects/{p}/locations/{loc}/publishers/google/models/{model}/operations/{op}
+        model_prefix = provider_task_id.split("/operations/", 1)[0].lstrip("/")
+        data = await _post(provider, f"/{model_prefix}:fetchPredictOperation", {"operationName": provider_task_id})
+        if not data.get("done"):
+            return {"state": "running"}
+        if data.get("error"):
+            err = data["error"]
+            return {"state": "failed", "error": err.get("message") if isinstance(err, dict) else str(err)}
+        resp = data.get("response") or {}
+        items = resp.get("videos") or resp.get("predictions") or []
+        for v in items:
+            if isinstance(v, dict) and v.get("bytesBase64Encoded"):
+                mime = v.get("mimeType") or "video/mp4"
+                return {"state": "succeeded", "url": f"data:{mime};base64,{v['bytesBase64Encoded']}",
+                        "seconds": None, "usage": {"output_seconds": None}}
+            if isinstance(v, dict) and v.get("gcsUri"):
+                return {"state": "succeeded", "url": v["gcsUri"], "seconds": None, "usage": {"output_seconds": None}}
+        return {"state": "failed", "error": f"no video in vertex response: {str(data)[:200]}"}
+    if provider.kind == "gemini_veo":
+        data = await _get(provider, "/" + provider_task_id.lstrip("/"))
+        if not data.get("done"):
+            return {"state": "running"}
+        if data.get("error"):
+            err = data["error"]
+            return {"state": "failed", "error": err.get("message") if isinstance(err, dict) else str(err)}
+        samples = ((data.get("response") or {}).get("generateVideoResponse") or {}).get("generatedSamples") or []
+        uri = (samples[0].get("video") or {}).get("uri") if samples else None
+        if not uri:
+            return {"state": "failed", "error": f"no video uri in Veo response: {str(data)[:200]}"}
+        return {"state": "succeeded", "url": uri, "seconds": None, "usage": {"output_seconds": None}}
     data = await _get(provider, f"/tasks/{provider_task_id}")
     seconds = data.get("duration") or (data.get("usage") or {}).get("output_seconds")
     return {"state": {"completed": "succeeded", "failed": "failed"}.get(data.get("status"), "running"),

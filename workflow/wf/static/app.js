@@ -36,7 +36,7 @@ function badge(st) {
 }
 const isLive = id => !!(S.models.find(m => m.id === id) || {}).live;
 const model = id => S.models.find(m => m.id === id) || {};
-// 挂在子路径下（例：https://stock.yuchenxu.cn/studio/ui/）时，接口、下载链接和 /media 素材都要带上前缀；
+// 挂在子路径下（例：https://example.com/studio/ui/）时，接口、下载链接和 /media 素材都要带上前缀；
 // 本机直接开 /ui/ 时 BASE 为空，行为不变。
 const BASE = location.pathname.replace(/\/ui(\/.*)?$/, '').replace(/\/+$/, '');
 function withBase(x) {

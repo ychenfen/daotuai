@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在纪总的 Windows 电脑上（Git Bash）把工作台推到 Linux 服务器并安装。
+# 在本地电脑上（Git Bash）把工作台推到 Linux 服务器并安装。
 #   bash deploy/push_from_windows.sh <域名> [--path /studio] [--with-data] [--force-data]
 #   --with-data   把电脑上的数据库和 media 一起搬过去（服务器上已有数据时拒绝，除非加 --force-data）
 # 密钥：从本机环境变量读 providers.yaml 里声明的 *_API_KEY，经 SSH 直接写进服务器 /opt/daotuai/.env（600 权限）；
@@ -14,7 +14,7 @@ while [ $# -gt 0 ]; do
     *) shift;;
   esac
 done
-HOST="${DAOTUAI_SERVER:-ubuntu@43.137.12.89}"
+HOST="${DAOTUAI_SERVER:-ubuntu@your-server-ip}"
 KEY="${DAOTUAI_SSH_KEY:-$USERPROFILE/.ssh/tmp_key}"
 S=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new
    -o UserKnownHostsFile="$USERPROFILE/.ssh/known_hosts" "$HOST")

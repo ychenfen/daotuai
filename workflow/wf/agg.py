@@ -143,9 +143,15 @@ class Agg:
 
     async def fetch(self, url: str) -> bytes:
         """下载上游产物（视频/图片）。上游 URL 是外网地址，单独开客户端，不走聚合层。"""
+        if url.startswith("data:") and ";base64," in url:
+            import base64
+            return base64.b64decode(url.split(";base64,", 1)[1])
         proxy = os.environ.get("WORKFLOW_PROXY") or None
+        headers = {}
+        if url.startswith("https://generativelanguage.googleapis.com/") and os.environ.get("GEMINI_API_KEY"):
+            headers["x-goog-api-key"] = os.environ["GEMINI_API_KEY"]
         async with httpx.AsyncClient(timeout=300, trust_env=False, proxy=proxy,
                                      follow_redirects=True) as c:
-            r = await c.get(url)
+            r = await c.get(url, headers=headers)
             r.raise_for_status()
             return r.content

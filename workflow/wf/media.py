@@ -437,9 +437,9 @@ def _assemble_sync(clips: list[dict], out_path: str, srt_path: str, aspect: str,
                 args += [*ss, "-i", dub]        # 配音轨和画面一起剪头
                 fmt = "aresample=44100,aformat=channel_layouts=stereo"
                 if dub_mode == "replace":
-                    fc = f"[{di}:a]{fmt},apad[a]"
+                    fc = f"[{di}:a]{fmt},apad=whole_dur={dur:.3f}[a]"
                 else:   # 配音为主，原声（音效/环境）压低垫底
-                    fc = (f"[{orig}]{fmt},volume={orig_volume:.2f}[o];[{di}:a]{fmt},apad[d];"
+                    fc = (f"[{orig}]{fmt},volume={orig_volume:.2f}[o];[{di}:a]{fmt}[d];"
                           f"[o][d]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]")
                 args += ["-filter_complex", fc, "-map", "0:v:0", "-map", "[a]"]
             elif not info.get("has_audio", False):
