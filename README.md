@@ -1,8 +1,37 @@
-# AI 短剧工作台（daotuai）· AI Short-Drama Studio
+# AI Short-Drama Studio · AI 短剧全流程工作台
 
-> End-to-end local AI short-drama production workbench: **Script → Story Bible & Beats → Assets → Storyboard → Blocking Chart → `@` Asset Prompts → Multi-model Video (Google Veo 3.1 / Wan 3.0 / Seedance / LibTV) → Visual QC & TTS Dubbing → Final MP4 + JianYing (剪映 / CapCut) Draft Export**.
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.135%2B-009688.svg)](https://fastapi.tiangolo.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> **End-to-end local AI Short-Drama & Micro-Drama Production Studio**: Script & Story Bible → Character/Scene Consistency → Storyboard → Blocking Chart → `@` Asset-Bound Prompts → Multi-Model Video (**Google Veo 3.1 / Vertex AI / Alibaba Wan 3.0 / ByteDance Seedance / LibTV**) → Multimodal Visual QC & Auto-Retake → TTS Dubbing → **Final MP4 + SRT + CapCut / JianYing (剪映) Draft Export**.
 
 剧本 → 资产 → 分镜 → 站位图 → 提示词 → 视频 → 成片，一条线跑通。支持 **Google Vertex AI（Gemini 3 / 2.5 Flash Image / Veo 3.1）**、**DeepSeek**、**阿里百炼（万相 3.0 / Qwen-VL / Qwen-TTS）**、**火山方舟（Seedream / Seedance）**、**LibTV**，无 key 时可用 `--mock` 零成本演练全流程。
+
+## Why This Project? / 核心亮点
+
+- **Zero-Cost Dry Run (`--mock`)**: Test the entire multi-episode pipeline locally without spending API credits.
+- **Character & Prop Consistency**: Multi-form & multi-version asset management, reference lock, blocking charts, and `@Character(Form)` prompt auto-binding.
+- **Multi-Provider Aggregator (`:8010`)**: Unified `chat` / `image` / `video` / `tts` gateway with weighted routing, failover, idempotent pre-hold billing, and project budget caps.
+- **Automated Visual QC & Auto-Retake**: Extracts frames and scores character consistency & prompt adherence using VLM (`gemini-3-flash` / `qwen3-vl-plus`), flagging or retaking failed shots.
+- **One-Click MP4 + JianYing (剪映) Draft Export**: Stitches clips with cross-dissolve (`xfade`), burns or exports `.srt` subtitles, mixes TTS dubbing, and exports editable JianYing/CapCut project drafts.
+
+## Quickstart / 快速启动
+
+```bash
+git clone https://github.com/ychenfen/ai-short-drama-studio.git
+cd ai-short-drama-studio
+python3 -m pip install -r aggregator/requirements.txt
+
+# 1) Zero-cost mock mode (no API keys needed)
+python3 run.py --mock
+
+# 2) Live mode (copy .env.example to .env and fill GEMINI_API_KEY / VERTEX_PROJECT_ID / DEEPSEEK_API_KEY / etc.)
+cp .env.example .env
+python3 run.py
+```
+
+Open `http://127.0.0.1:8011/` in your browser (requires Python 3.11+ and `ffmpeg`).
 
 ```
 ┌──────────────────────────────────┐  HTTP  ┌─────────────────────────────┐
