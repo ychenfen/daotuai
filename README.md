@@ -16,6 +16,12 @@
 - **Automated Visual QC & Auto-Retake**: Extracts frames and scores character consistency & prompt adherence using VLM (`gemini-3-flash` / `qwen3-vl-plus`), flagging or retaking failed shots.
 - **One-Click MP4 + JianYing (剪映) Draft Export**: Stitches clips with cross-dissolve (`xfade`), burns or exports `.srt` subtitles, mixes TTS dubbing, and exports editable JianYing/CapCut project drafts.
 
+## Screenshots / 界面实拍
+
+| Shot Prompt & Reference Assets & Visual QC (Veo 3.1) | Final Assembly & CapCut / JianYing Draft Export |
+| :---: | :---: |
+| ![Shot Video & Visual QC](docs/images/ui-video-qc.png) | ![Final Episode Assembly & Export](docs/images/ui-final-export.png) |
+
 ## Quickstart / 快速启动
 
 ```bash

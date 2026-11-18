@@ -19,6 +19,7 @@ tools/*.txt
 
 # 大文件：截图、PDF、视频
 *.png
+!docs/images/*.png
 *.jpg
 *.jpeg
 *.pdf

@@ -362,6 +362,31 @@ models:
     routes:
       - { provider: vertex_gemini, api_id: gemini-3-flash-preview, weight: 1 }
 
+  - id: vertex-gemini-3.1-pro
+    type: chat
+    context: 1000000
+    unit: tokens
+    price: { input_rmb_per_m: 9.0, output_rmb_per_m: 72.0 }
+    cost: { input_rmb_per_m: 9.0, output_rmb_per_m: 72.0 }
+    routes:
+      - { provider: vertex_gemini, api_id: gemini-3.1-pro-preview, weight: 1 }
+
+  - id: vertex-gemini-3-pro-image
+    type: image
+    unit: image
+    price: { rmb_per_image: 0.45 }
+    cost: { rmb_per_image: 0.45 }
+    routes:
+      - { provider: vertex_gemini, api_id: gemini-3-pro-image, weight: 1 }
+
+  - id: vertex-imagen-4.0-ultra
+    type: image
+    unit: image
+    price: { rmb_per_image: 0.45 }
+    cost: { rmb_per_image: 0.45 }
+    routes:
+      - { provider: vertex_imagen, api_id: imagen-4.0-ultra-generate-001, weight: 1 }
+
   - id: vertex-imagen-4.0
     type: image
     unit: image
